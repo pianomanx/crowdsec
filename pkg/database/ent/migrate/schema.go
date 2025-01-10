@@ -11,8 +11,8 @@ var (
 	// AlertsColumns holds the columns for the "alerts" table.
 	AlertsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt, Increment: true},
-		{Name: "created_at", Type: field.TypeTime, Nullable: true},
-		{Name: "updated_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
 		{Name: "scenario", Type: field.TypeString},
 		{Name: "bucket_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "message", Type: field.TypeString, Nullable: true, Default: ""},
@@ -33,6 +33,8 @@ var (
 		{Name: "scenario_version", Type: field.TypeString, Nullable: true},
 		{Name: "scenario_hash", Type: field.TypeString, Nullable: true},
 		{Name: "simulated", Type: field.TypeBool, Default: false},
+		{Name: "uuid", Type: field.TypeString, Nullable: true},
+		{Name: "remediation", Type: field.TypeBool, Nullable: true},
 		{Name: "machine_alerts", Type: field.TypeInt, Nullable: true},
 	}
 	// AlertsTable holds the schema information for the "alerts" table.
@@ -43,7 +45,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "alerts_machines_alerts",
-				Columns:    []*schema.Column{AlertsColumns[23]},
+				Columns:    []*schema.Column{AlertsColumns[25]},
 				RefColumns: []*schema.Column{MachinesColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
@@ -59,17 +61,20 @@ var (
 	// BouncersColumns holds the columns for the "bouncers" table.
 	BouncersColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt, Increment: true},
-		{Name: "created_at", Type: field.TypeTime, Nullable: true},
-		{Name: "updated_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
 		{Name: "name", Type: field.TypeString, Unique: true},
 		{Name: "api_key", Type: field.TypeString},
 		{Name: "revoked", Type: field.TypeBool},
 		{Name: "ip_address", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "type", Type: field.TypeString, Nullable: true},
 		{Name: "version", Type: field.TypeString, Nullable: true},
-		{Name: "until", Type: field.TypeTime, Nullable: true},
-		{Name: "last_pull", Type: field.TypeTime},
+		{Name: "last_pull", Type: field.TypeTime, Nullable: true},
 		{Name: "auth_type", Type: field.TypeString, Default: "api-key"},
+		{Name: "osname", Type: field.TypeString, Nullable: true},
+		{Name: "osversion", Type: field.TypeString, Nullable: true},
+		{Name: "featureflags", Type: field.TypeString, Nullable: true},
+		{Name: "auto_created", Type: field.TypeBool, Default: false},
 	}
 	// BouncersTable holds the schema information for the "bouncers" table.
 	BouncersTable = &schema.Table{
@@ -77,11 +82,25 @@ var (
 		Columns:    BouncersColumns,
 		PrimaryKey: []*schema.Column{BouncersColumns[0]},
 	}
+	// ConfigItemsColumns holds the columns for the "config_items" table.
+	ConfigItemsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt, Increment: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "name", Type: field.TypeString, Unique: true},
+		{Name: "value", Type: field.TypeString},
+	}
+	// ConfigItemsTable holds the schema information for the "config_items" table.
+	ConfigItemsTable = &schema.Table{
+		Name:       "config_items",
+		Columns:    ConfigItemsColumns,
+		PrimaryKey: []*schema.Column{ConfigItemsColumns[0]},
+	}
 	// DecisionsColumns holds the columns for the "decisions" table.
 	DecisionsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt, Increment: true},
-		{Name: "created_at", Type: field.TypeTime, Nullable: true},
-		{Name: "updated_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
 		{Name: "until", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"mysql": "datetime"}},
 		{Name: "scenario", Type: field.TypeString},
 		{Name: "type", Type: field.TypeString},
@@ -94,6 +113,7 @@ var (
 		{Name: "value", Type: field.TypeString},
 		{Name: "origin", Type: field.TypeString},
 		{Name: "simulated", Type: field.TypeBool, Default: false},
+		{Name: "uuid", Type: field.TypeString, Nullable: true},
 		{Name: "alert_decisions", Type: field.TypeInt, Nullable: true},
 	}
 	// DecisionsTable holds the schema information for the "decisions" table.
@@ -104,7 +124,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "decisions_alerts_decisions",
-				Columns:    []*schema.Column{DecisionsColumns[15]},
+				Columns:    []*schema.Column{DecisionsColumns[16]},
 				RefColumns: []*schema.Column{AlertsColumns[0]},
 				OnDelete:   schema.Cascade,
 			},
@@ -125,13 +145,18 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{DecisionsColumns[3]},
 			},
+			{
+				Name:    "decision_alert_decisions",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionsColumns[16]},
+			},
 		},
 	}
 	// EventsColumns holds the columns for the "events" table.
 	EventsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt, Increment: true},
-		{Name: "created_at", Type: field.TypeTime, Nullable: true},
-		{Name: "updated_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
 		{Name: "time", Type: field.TypeTime},
 		{Name: "serialized", Type: field.TypeString, Size: 8191},
 		{Name: "alert_events", Type: field.TypeInt, Nullable: true},
@@ -149,22 +174,45 @@ var (
 				OnDelete:   schema.Cascade,
 			},
 		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "event_alert_events",
+				Unique:  false,
+				Columns: []*schema.Column{EventsColumns[5]},
+			},
+		},
+	}
+	// LocksColumns holds the columns for the "locks" table.
+	LocksColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt, Increment: true},
+		{Name: "name", Type: field.TypeString, Unique: true},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// LocksTable holds the schema information for the "locks" table.
+	LocksTable = &schema.Table{
+		Name:       "locks",
+		Columns:    LocksColumns,
+		PrimaryKey: []*schema.Column{LocksColumns[0]},
 	}
 	// MachinesColumns holds the columns for the "machines" table.
 	MachinesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt, Increment: true},
-		{Name: "created_at", Type: field.TypeTime, Nullable: true},
-		{Name: "updated_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
 		{Name: "last_push", Type: field.TypeTime, Nullable: true},
 		{Name: "last_heartbeat", Type: field.TypeTime, Nullable: true},
 		{Name: "machine_id", Type: field.TypeString, Unique: true},
 		{Name: "password", Type: field.TypeString},
 		{Name: "ip_address", Type: field.TypeString},
-		{Name: "scenarios", Type: field.TypeString, Nullable: true, Size: 4095},
+		{Name: "scenarios", Type: field.TypeString, Nullable: true, Size: 100000},
 		{Name: "version", Type: field.TypeString, Nullable: true},
 		{Name: "is_validated", Type: field.TypeBool, Default: false},
-		{Name: "status", Type: field.TypeString, Nullable: true},
 		{Name: "auth_type", Type: field.TypeString, Default: "password"},
+		{Name: "osname", Type: field.TypeString, Nullable: true},
+		{Name: "osversion", Type: field.TypeString, Nullable: true},
+		{Name: "featureflags", Type: field.TypeString, Nullable: true},
+		{Name: "hubstate", Type: field.TypeJSON, Nullable: true},
+		{Name: "datasources", Type: field.TypeJSON, Nullable: true},
 	}
 	// MachinesTable holds the schema information for the "machines" table.
 	MachinesTable = &schema.Table{
@@ -175,8 +223,8 @@ var (
 	// MetaColumns holds the columns for the "meta" table.
 	MetaColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt, Increment: true},
-		{Name: "created_at", Type: field.TypeTime, Nullable: true},
-		{Name: "updated_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
 		{Name: "key", Type: field.TypeString},
 		{Name: "value", Type: field.TypeString, Size: 4095},
 		{Name: "alert_metas", Type: field.TypeInt, Nullable: true},
@@ -194,15 +242,40 @@ var (
 				OnDelete:   schema.Cascade,
 			},
 		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "meta_alert_metas",
+				Unique:  false,
+				Columns: []*schema.Column{MetaColumns[5]},
+			},
+		},
+	}
+	// MetricsColumns holds the columns for the "metrics" table.
+	MetricsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt, Increment: true},
+		{Name: "generated_type", Type: field.TypeEnum, Enums: []string{"LP", "RC"}},
+		{Name: "generated_by", Type: field.TypeString},
+		{Name: "received_at", Type: field.TypeTime},
+		{Name: "pushed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "payload", Type: field.TypeString, Size: 2147483647},
+	}
+	// MetricsTable holds the schema information for the "metrics" table.
+	MetricsTable = &schema.Table{
+		Name:       "metrics",
+		Columns:    MetricsColumns,
+		PrimaryKey: []*schema.Column{MetricsColumns[0]},
 	}
 	// Tables holds all the tables in the schema.
 	Tables = []*schema.Table{
 		AlertsTable,
 		BouncersTable,
+		ConfigItemsTable,
 		DecisionsTable,
 		EventsTable,
+		LocksTable,
 		MachinesTable,
 		MetaTable,
+		MetricsTable,
 	}
 )
 

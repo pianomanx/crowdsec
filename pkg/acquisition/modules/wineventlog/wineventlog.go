@@ -3,6 +3,7 @@
 package wineventlogacquisition
 
 import (
+	"context"
 	"errors"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -15,15 +16,19 @@ import (
 
 type WinEventLogSource struct{}
 
+func (w *WinEventLogSource) GetUuid() string {
+	return ""
+}
+
 func (w *WinEventLogSource) UnmarshalConfig(yamlConfig []byte) error {
 	return nil
 }
 
-func (w *WinEventLogSource) Configure(yamlConfig []byte, logger *log.Entry) error {
+func (w *WinEventLogSource) Configure(yamlConfig []byte, logger *log.Entry, metricsLevel int) error {
 	return nil
 }
 
-func (w *WinEventLogSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry) error {
+func (w *WinEventLogSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry, uuid string) error {
 	return nil
 }
 
@@ -35,7 +40,7 @@ func (w *WinEventLogSource) SupportedModes() []string {
 	return []string{configuration.TAIL_MODE, configuration.CAT_MODE}
 }
 
-func (w *WinEventLogSource) OneShotAcquisition(out chan types.Event, t *tomb.Tomb) error {
+func (w *WinEventLogSource) OneShotAcquisition(_ context.Context, _ chan types.Event, _ *tomb.Tomb) error {
 	return nil
 }
 
@@ -55,7 +60,7 @@ func (w *WinEventLogSource) CanRun() error {
 	return errors.New("windows event log acquisition is only supported on Windows")
 }
 
-func (w *WinEventLogSource) StreamingAcquisition(out chan types.Event, t *tomb.Tomb) error {
+func (w *WinEventLogSource) StreamingAcquisition(ctx context.Context, out chan types.Event, t *tomb.Tomb) error {
 	return nil
 }
 

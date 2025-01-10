@@ -10,19 +10,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	// enable profiling
 	_ "net/http/pprof"
 	"os"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/crowdsecurity/crowdsec/pkg/cwversion"
-	"github.com/crowdsecurity/crowdsec/pkg/exprhelpers"
-
-	log "github.com/sirupsen/logrus"
-
 	"github.com/goombaio/namegenerator"
+	log "github.com/sirupsen/logrus"
 	yaml "gopkg.in/yaml.v2"
+
+	"github.com/crowdsecurity/crowdsec/pkg/cwversion/constraint"
+	"github.com/crowdsecurity/crowdsec/pkg/exprhelpers"
 )
 
 var seed namegenerator.Generator = namegenerator.NewNameGenerator(time.Now().UTC().UnixNano())
@@ -58,6 +58,7 @@ func LoadStages(stageFiles []Stagefile, pctx *UnixParserCtx, ectx EnricherCtx) (
 		if err != nil {
 			return nil, fmt.Errorf("can't access parsing configuration file %s : %s", stageFile.Filename, err)
 		}
+		defer yamlFile.Close()
 		//process the yaml
 		dec := yaml.NewDecoder(yamlFile)
 		dec.SetStrict(true)
@@ -71,12 +72,12 @@ func LoadStages(stageFiles []Stagefile, pctx *UnixParserCtx, ectx EnricherCtx) (
 					log.Tracef("End of yaml file")
 					break
 				}
-				log.Fatalf("Error decoding parsing configuration file '%s': %v", stageFile.Filename, err)
+				return nil, fmt.Errorf("error decoding parsing configuration file '%s': %v", stageFile.Filename, err)
 			}
 
 			//check for empty bucket
 			if node.Name == "" && node.Description == "" && node.Author == "" {
-				log.Infof("Node in %s has no name,author or description. Skipping.", stageFile.Filename)
+				log.Infof("Node in %s has no name, author or description. Skipping.", stageFile.Filename)
 				continue
 			}
 			//check compat
@@ -84,12 +85,12 @@ func LoadStages(stageFiles []Stagefile, pctx *UnixParserCtx, ectx EnricherCtx) (
 				log.Tracef("no version in %s, assuming '1.0'", node.Name)
 				node.FormatVersion = "1.0"
 			}
-			ok, err := cwversion.Statisfies(node.FormatVersion, cwversion.Constraint_parser)
+			ok, err := constraint.Satisfies(node.FormatVersion, constraint.Parser)
 			if err != nil {
-				log.Fatalf("Failed to check version : %s", err)
+				return nil, fmt.Errorf("failed to check version : %s", err)
 			}
 			if !ok {
-				log.Errorf("%s : %s doesn't satisfy parser format %s, skip", node.Name, node.FormatVersion, cwversion.Constraint_parser)
+				log.Errorf("%s : %s doesn't satisfy parser format %s, skip", node.Name, node.FormatVersion, constraint.Parser)
 				continue
 			}
 
@@ -110,14 +111,16 @@ func LoadStages(stageFiles []Stagefile, pctx *UnixParserCtx, ectx EnricherCtx) (
 				continue
 			}
 
-			if len(node.Data) > 0 {
-				for _, data := range node.Data {
-					err = exprhelpers.FileInit(pctx.DataFolder, data.DestPath, data.Type)
-					if err != nil {
-						log.Error(err)
-					}
+			for _, data := range node.Data {
+				err = exprhelpers.FileInit(pctx.DataFolder, data.DestPath, data.Type)
+				if err != nil {
+					log.Error(err)
+				}
+				if data.Type == "regexp" { //cache only makes sense for regexp
+					exprhelpers.RegexpCacheInit(data.DestPath, *data)
 				}
 			}
+
 			nodes = append(nodes, node)
 			nodesCount++
 		}

@@ -4,15 +4,15 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"runtime"
-	"time"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	typesImage "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/crowdsecurity/go-cs-lib/ptr"
 )
 
 type Container struct {
@@ -47,7 +47,7 @@ func NewContainer(listenAddr string, listenPort string, sharedFolder string, con
 func (c *Container) Create() error {
 	ctx := context.Background()
 	log.Printf("Pulling docker image %s", c.Image)
-	reader, err := c.CLI.ImagePull(ctx, c.Image, types.ImagePullOptions{})
+	reader, err := c.CLI.ImagePull(ctx, c.Image, typesImage.PullOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to pull docker image : %s", err)
 	}
@@ -92,14 +92,6 @@ func (c *Container) Create() error {
 		Tty:   true,
 		Env:   env,
 	}
-	os := runtime.GOOS
-	switch os {
-	case "linux":
-	case "windows", "darwin":
-		return fmt.Errorf("Mac and Windows are not supported yet")
-	default:
-		return fmt.Errorf("OS '%s' is not supported", os)
-	}
 
 	log.Infof("creating container '%s'", c.Name)
 	resp, err := c.CLI.ContainerCreate(ctx, dockerConfig, hostConfig, nil, nil, c.Name)
@@ -113,7 +105,7 @@ func (c *Container) Create() error {
 
 func (c *Container) Start() error {
 	ctx := context.Background()
-	if err := c.CLI.ContainerStart(ctx, c.Name, types.ContainerStartOptions{}); err != nil {
+	if err := c.CLI.ContainerStart(ctx, c.Name, container.StartOptions{}); err != nil {
 		return fmt.Errorf("failed while starting %s : %s", c.ID, err)
 	}
 
@@ -126,7 +118,7 @@ func StartContainer(name string) error {
 		return fmt.Errorf("failed to create docker client : %s", err)
 	}
 	ctx := context.Background()
-	if err := cli.ContainerStart(ctx, name, types.ContainerStartOptions{}); err != nil {
+	if err := cli.ContainerStart(ctx, name, container.StartOptions{}); err != nil {
 		return fmt.Errorf("failed while starting %s : %s", name, err)
 	}
 
@@ -139,8 +131,8 @@ func StopContainer(name string) error {
 		return fmt.Errorf("failed to create docker client : %s", err)
 	}
 	ctx := context.Background()
-	var to time.Duration = 20 * time.Second
-	if err := cli.ContainerStop(ctx, name, &to); err != nil {
+	to := container.StopOptions{Timeout: ptr.Of(20)}
+	if err := cli.ContainerStop(ctx, name, to); err != nil {
 		return fmt.Errorf("failed while stopping %s : %s", name, err)
 	}
 	log.Printf("container stopped successfully")
@@ -154,21 +146,21 @@ func RemoveContainer(name string) error {
 	}
 	ctx := context.Background()
 	log.Printf("Removing docker metabase %s", name)
-	if err := cli.ContainerRemove(ctx, name, types.ContainerRemoveOptions{}); err != nil {
+	if err := cli.ContainerRemove(ctx, name, container.RemoveOptions{}); err != nil {
 		return fmt.Errorf("failed to remove container %s : %s", name, err)
 	}
 	return nil
 }
 
-func RemoveImageContainer() error {
+func RemoveImageContainer(image string) error {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return fmt.Errorf("failed to create docker client : %s", err)
 	}
 	ctx := context.Background()
-	log.Printf("Removing docker image '%s'", metabaseImage)
-	if _, err := cli.ImageRemove(ctx, metabaseImage, types.ImageRemoveOptions{}); err != nil {
-		return fmt.Errorf("failed to remove image container %s : %s", metabaseImage, err)
+	log.Printf("Removing docker image '%s'", image)
+	if _, err := cli.ImageRemove(ctx, image, typesImage.RemoveOptions{}); err != nil {
+		return fmt.Errorf("failed to remove image container %s : %s", image, err)
 	}
 	return nil
 }

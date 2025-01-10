@@ -7,8 +7,7 @@ import (
 )
 
 func NewCompletionCmd() *cobra.Command {
-
-	var completionCmd = &cobra.Command{
+	completionCmd := &cobra.Command{
 		Use:   "completion [bash|zsh|powershell|fish]",
 		Short: "Generate completion script",
 		Long: `To load completions:
@@ -68,7 +67,7 @@ func NewCompletionCmd() *cobra.Command {
 		DisableFlagsInUseLine: true,
 		DisableAutoGenTag:     true,
 		ValidArgs:             []string{"bash", "zsh", "powershell", "fish"},
-		Args:                  cobra.ExactValidArgs(1),
+		Args:                  cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
 		Run: func(cmd *cobra.Command, args []string) {
 			switch args[0] {
 			case "bash":
@@ -82,5 +81,6 @@ func NewCompletionCmd() *cobra.Command {
 			}
 		},
 	}
+
 	return completionCmd
 }

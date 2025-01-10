@@ -8,8 +8,6 @@ import (
 	"github.com/crowdsecurity/crowdsec/pkg/models"
 )
 
-// type ApiAlerts service
-
 type AuthService service
 
 // Don't add it to the models, as they are used with LAPI, but the enroll endpoint is specific to CAPI
@@ -21,8 +19,8 @@ type enrollRequest struct {
 }
 
 func (s *AuthService) UnregisterWatcher(ctx context.Context) (*Response, error) {
-
 	u := fmt.Sprintf("%s/watchers", s.client.URLPrefix)
+
 	req, err := s.client.NewRequest(http.MethodDelete, u, nil)
 	if err != nil {
 		return nil, err
@@ -32,11 +30,11 @@ func (s *AuthService) UnregisterWatcher(ctx context.Context) (*Response, error) 
 	if err != nil {
 		return resp, err
 	}
+
 	return resp, nil
 }
 
 func (s *AuthService) RegisterWatcher(ctx context.Context, registration models.WatcherRegistrationRequest) (*Response, error) {
-
 	u := fmt.Sprintf("%s/watchers", s.client.URLPrefix)
 
 	req, err := s.client.NewRequest(http.MethodPost, u, &registration)
@@ -48,25 +46,31 @@ func (s *AuthService) RegisterWatcher(ctx context.Context, registration models.W
 	if err != nil {
 		return resp, err
 	}
+
 	return resp, nil
 }
 
-func (s *AuthService) AuthenticateWatcher(ctx context.Context, auth models.WatcherAuthRequest) (*Response, error) {
+func (s *AuthService) AuthenticateWatcher(ctx context.Context, auth models.WatcherAuthRequest) (models.WatcherAuthResponse, *Response, error) {
+	var authResp models.WatcherAuthResponse
+
 	u := fmt.Sprintf("%s/watchers/login", s.client.URLPrefix)
+
 	req, err := s.client.NewRequest(http.MethodPost, u, &auth)
 	if err != nil {
-		return nil, err
+		return authResp, nil, err
 	}
 
-	resp, err := s.client.Do(ctx, req, nil)
+	resp, err := s.client.Do(ctx, req, &authResp)
 	if err != nil {
-		return resp, err
+		return authResp, resp, err
 	}
-	return resp, nil
+
+	return authResp, resp, nil
 }
 
 func (s *AuthService) EnrollWatcher(ctx context.Context, enrollKey string, name string, tags []string, overwrite bool) (*Response, error) {
 	u := fmt.Sprintf("%s/watchers/enroll", s.client.URLPrefix)
+
 	req, err := s.client.NewRequest(http.MethodPost, u, &enrollRequest{EnrollKey: enrollKey, Name: name, Tags: tags, Overwrite: overwrite})
 	if err != nil {
 		return nil, err
@@ -76,5 +80,6 @@ func (s *AuthService) EnrollWatcher(ctx context.Context, enrollKey string, name 
 	if err != nil {
 		return resp, err
 	}
+
 	return resp, nil
 }
