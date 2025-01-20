@@ -3,15 +3,14 @@
 // license that can be found in the LICENSE file.
 
 //go:build windows
-// +build windows
 
 package main
 
 import (
+	"fmt"
 	"syscall"
 	"time"
 
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
@@ -24,7 +23,7 @@ type crowdsec_winservice struct {
 	config *csconfig.Config
 }
 
-func (m *crowdsec_winservice) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (ssec bool, errno uint32) {
+func (m *crowdsec_winservice) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
 	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown
 	changes <- svc.Status{State: svc.StartPending}
 	tick := time.Tick(500 * time.Millisecond)
@@ -60,14 +59,15 @@ func (m *crowdsec_winservice) Execute(args []string, r <-chan svc.ChangeRequest,
 	if err != nil {
 		log.Fatal(err)
 	}
-	return
+
+	return false, 0
 }
 
 func runService(name string) error {
 	// All the calls to logging before the logger is configured are pretty much useless, but we keep them for clarity
 	err := eventlog.InstallAsEventCreate("CrowdSec", eventlog.Error|eventlog.Warning|eventlog.Info)
 	if err != nil {
-		if errno, ok := err.(syscall.Errno); ok {
+		if errno, ok := err.(syscall.Errno); ok {   //nolint:errorlint
 			if errno == windows.ERROR_ACCESS_DENIED {
 				log.Warnf("Access denied when installing event source, running as non-admin ?")
 			} else {
@@ -97,12 +97,8 @@ func runService(name string) error {
 		log.Warnf("Failed to open event log: %s", err)
 	}
 
-	cConfig, err := csconfig.NewConfig(flags.ConfigFile, flags.DisableAgent, flags.DisableAPI)
+	cConfig, err := LoadConfig(flags.ConfigFile, flags.DisableAgent, flags.DisableAPI, false)
 	if err != nil {
-		return err
-	}
-
-	if err := LoadConfig(cConfig); err != nil {
 		return err
 	}
 
@@ -110,7 +106,7 @@ func runService(name string) error {
 	winsvc := crowdsec_winservice{config: cConfig}
 
 	if err := svc.Run(name, &winsvc); err != nil {
-		return errors.Wrapf(err, "%s service failed", name)
+		return fmt.Errorf("%s service failed: %w", name, err)
 	}
 
 	log.Infof("%s service stopped", name)

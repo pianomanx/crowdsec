@@ -5,9 +5,11 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/crowdsecurity/crowdsec/pkg/csconfig"
+	"github.com/crowdsecurity/crowdsec/pkg/exprhelpers"
 	"github.com/crowdsecurity/crowdsec/pkg/models"
-	"gotest.tools/v3/assert"
 )
 
 var (
@@ -84,17 +86,29 @@ func TestNewProfile(t *testing.T) {
 			},
 			expectedNbProfile: 1,
 		},
+		{
+			name: "filter ok and no duration",
+			profileCfg: &csconfig.ProfileCfg{
+				Filters: []string{
+					"1==1",
+				},
+				Debug: &boolTrue,
+				Decisions: []models.Decision{
+					{Type: &typ, Scope: &scope, Simulated: &boolFalse},
+				},
+			},
+			expectedNbProfile: 1,
+		},
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			profilesCfg := []*csconfig.ProfileCfg{
 				test.profileCfg,
 			}
 			profile, _ := NewProfile(profilesCfg)
 			fmt.Printf("expected : %+v | result : %+v", test.expectedNbProfile, len(profile))
-			assert.Equal(t, test.expectedNbProfile, len(profile))
+			require.Len(t, profile, test.expectedNbProfile)
 		})
 	}
 }
@@ -104,6 +118,10 @@ func TestEvaluateProfile(t *testing.T) {
 		profileCfg *csconfig.ProfileCfg
 		Alert      *models.Alert
 	}
+
+	err := exprhelpers.Init(nil)
+	require.NoError(t, err)
+
 	tests := []struct {
 		name                  string
 		args                  args
@@ -115,7 +133,7 @@ func TestEvaluateProfile(t *testing.T) {
 			name: "simple pass single expr",
 			args: args{
 				profileCfg: &csconfig.ProfileCfg{
-					Filters: []string{fmt.Sprintf("Alert.GetScenario() == \"%s\"", scenario)},
+					Filters: []string{fmt.Sprintf("Alert.GetScenario() == %q", scenario)},
 					Debug:   &boolFalse,
 				},
 				Alert: &models.Alert{Remediation: true, Scenario: &scenario},
@@ -178,24 +196,28 @@ func TestEvaluateProfile(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			profilesCfg := []*csconfig.ProfileCfg{
 				tt.args.profileCfg,
 			}
+
 			profile, err := NewProfile(profilesCfg)
 			if err != nil {
 				t.Errorf("failed to get newProfile : %+v", err)
 			}
+
 			got, got1, _ := profile[0].EvaluateProfile(tt.args.Alert)
+
 			if !reflect.DeepEqual(len(got), tt.expectedDecisionCount) {
 				t.Errorf("EvaluateProfile() got = %+v, want %+v", got, tt.expectedDecisionCount)
 			}
+
 			if got1 != tt.expectedMatchStatus {
 				t.Errorf("EvaluateProfile() got1 = %v, want %v", got1, tt.expectedMatchStatus)
 			}
+
 			if tt.expectedDuration != "" {
-				assert.Equal(t, tt.expectedDuration, *got[0].Duration, "The two durations should be the same")
+				require.Equal(t, tt.expectedDuration, *got[0].Duration, "The two durations should be the same")
 			}
 		})
 	}

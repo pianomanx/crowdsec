@@ -1,22 +1,24 @@
 package syslogacquisition
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/tomb.v2"
 	"gopkg.in/yaml.v2"
 
+	"github.com/crowdsecurity/go-cs-lib/trace"
+
 	"github.com/crowdsecurity/crowdsec/pkg/acquisition/configuration"
 	"github.com/crowdsecurity/crowdsec/pkg/acquisition/modules/syslog/internal/parser/rfc3164"
 	"github.com/crowdsecurity/crowdsec/pkg/acquisition/modules/syslog/internal/parser/rfc5424"
 	syslogserver "github.com/crowdsecurity/crowdsec/pkg/acquisition/modules/syslog/internal/server"
-	leaky "github.com/crowdsecurity/crowdsec/pkg/leakybucket"
 	"github.com/crowdsecurity/crowdsec/pkg/types"
 )
 
@@ -29,10 +31,11 @@ type SyslogConfiguration struct {
 }
 
 type SyslogSource struct {
-	config     SyslogConfiguration
-	logger     *log.Entry
-	server     *syslogserver.SyslogServer
-	serverTomb *tomb.Tomb
+	metricsLevel int
+	config       SyslogConfiguration
+	logger       *log.Entry
+	server       *syslogserver.SyslogServer
+	serverTomb   *tomb.Tomb
 }
 
 var linesReceived = prometheus.NewCounterVec(
@@ -48,6 +51,10 @@ var linesParsed = prometheus.NewCounterVec(
 		Help: "Total lines that were successfully parsed",
 	},
 	[]string{"source", "type"})
+
+func (s *SyslogSource) GetUuid() string {
+	return s.config.UniqueId
+}
 
 func (s *SyslogSource) GetName() string {
 	return "syslog"
@@ -73,12 +80,12 @@ func (s *SyslogSource) GetAggregMetrics() []prometheus.Collector {
 	return []prometheus.Collector{linesReceived, linesParsed}
 }
 
-func (s *SyslogSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry) error {
-	return fmt.Errorf("syslog datasource does not support one shot acquisition")
+func (s *SyslogSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry, uuid string) error {
+	return errors.New("syslog datasource does not support one shot acquisition")
 }
 
-func (s *SyslogSource) OneShotAcquisition(out chan types.Event, t *tomb.Tomb) error {
-	return fmt.Errorf("syslog datasource does not support one shot acquisition")
+func (s *SyslogSource) OneShotAcquisition(_ context.Context, _ chan types.Event, _ *tomb.Tomb) error {
+	return errors.New("syslog datasource does not support one shot acquisition")
 }
 
 func validatePort(port int) bool {
@@ -95,11 +102,11 @@ func (s *SyslogSource) UnmarshalConfig(yamlConfig []byte) error {
 
 	err := yaml.UnmarshalStrict(yamlConfig, &s.config)
 	if err != nil {
-		return errors.Wrap(err, "Cannot parse syslog configuration")
+		return fmt.Errorf("cannot parse syslog configuration: %w", err)
 	}
 
 	if s.config.Addr == "" {
-		s.config.Addr = "127.0.0.1" //do we want a usable or secure default ?
+		s.config.Addr = "127.0.0.1" // do we want a usable or secure default ?
 	}
 	if s.config.Port == 0 {
 		s.config.Port = 514
@@ -117,10 +124,10 @@ func (s *SyslogSource) UnmarshalConfig(yamlConfig []byte) error {
 	return nil
 }
 
-func (s *SyslogSource) Configure(yamlConfig []byte, logger *log.Entry) error {
+func (s *SyslogSource) Configure(yamlConfig []byte, logger *log.Entry, metricsLevel int) error {
 	s.logger = logger
 	s.logger.Infof("Starting syslog datasource configuration")
-
+	s.metricsLevel = metricsLevel
 	err := s.UnmarshalConfig(yamlConfig)
 	if err != nil {
 		return err
@@ -129,24 +136,25 @@ func (s *SyslogSource) Configure(yamlConfig []byte, logger *log.Entry) error {
 	return nil
 }
 
-func (s *SyslogSource) StreamingAcquisition(out chan types.Event, t *tomb.Tomb) error {
+func (s *SyslogSource) StreamingAcquisition(ctx context.Context, out chan types.Event, t *tomb.Tomb) error {
 	c := make(chan syslogserver.SyslogMessage)
 	s.server = &syslogserver.SyslogServer{Logger: s.logger.WithField("syslog", "internal"), MaxMessageLen: s.config.MaxMessageLen}
 	s.server.SetChannel(c)
 	err := s.server.Listen(s.config.Addr, s.config.Port)
 	if err != nil {
-		return errors.Wrap(err, "could not start syslog server")
+		return fmt.Errorf("could not start syslog server: %w", err)
 	}
 	s.serverTomb = s.server.StartServer()
 	t.Go(func() error {
-		defer types.CatchPanic("crowdsec/acquis/syslog/live")
+		defer trace.CatchPanic("crowdsec/acquis/syslog/live")
 		return s.handleSyslogMsg(out, t, c)
 	})
 	return nil
 }
 
 func (s *SyslogSource) buildLogFromSyslog(ts time.Time, hostname string,
-	appname string, pid string, msg string) string {
+	appname string, pid string, msg string,
+) string {
 	ret := ""
 	if !ts.IsZero() {
 		ret += ts.Format("Jan 2 15:04:05")
@@ -172,7 +180,6 @@ func (s *SyslogSource) buildLogFromSyslog(ts time.Time, hostname string,
 		ret += msg
 	}
 	return ret
-
 }
 
 func (s *SyslogSource) handleSyslogMsg(out chan types.Event, t *tomb.Tomb, c chan syslogserver.SyslogMessage) error {
@@ -194,7 +201,9 @@ func (s *SyslogSource) handleSyslogMsg(out chan types.Event, t *tomb.Tomb, c cha
 
 			logger := s.logger.WithField("client", syslogLine.Client)
 			logger.Tracef("raw: %s", syslogLine)
-			linesReceived.With(prometheus.Labels{"source": syslogLine.Client}).Inc()
+			if s.metricsLevel != configuration.METRICS_NONE {
+				linesReceived.With(prometheus.Labels{"source": syslogLine.Client}).Inc()
+			}
 			p := rfc3164.NewRFC3164Parser(rfc3164.WithCurrentYear())
 			err := p.Parse(syslogLine.Message)
 			if err != nil {
@@ -207,8 +216,14 @@ func (s *SyslogSource) handleSyslogMsg(out chan types.Event, t *tomb.Tomb, c cha
 					continue
 				}
 				line = s.buildLogFromSyslog(p2.Timestamp, p2.Hostname, p2.Tag, p2.PID, p2.Message)
+				if s.metricsLevel != configuration.METRICS_NONE {
+					linesParsed.With(prometheus.Labels{"source": syslogLine.Client, "type": "rfc5424"}).Inc()
+				}
 			} else {
 				line = s.buildLogFromSyslog(p.Timestamp, p.Hostname, p.Tag, p.PID, p.Message)
+				if s.metricsLevel != configuration.METRICS_NONE {
+					linesParsed.With(prometheus.Labels{"source": syslogLine.Client, "type": "rfc3164"}).Inc()
+				}
 			}
 
 			line = strings.TrimSuffix(line, "\n")
@@ -220,11 +235,9 @@ func (s *SyslogSource) handleSyslogMsg(out chan types.Event, t *tomb.Tomb, c cha
 			l.Time = ts
 			l.Src = syslogLine.Client
 			l.Process = true
-			if !s.config.UseTimeMachine {
-				out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.LIVE}
-			} else {
-				out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.TIMEMACHINE}
-			}
+			evt := types.MakeEvent(s.config.UseTimeMachine, types.LOG, true)
+			evt.Line = l
+			out <- evt
 		}
 	}
 }

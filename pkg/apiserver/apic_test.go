@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"reflect"
@@ -18,35 +20,42 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/tomb.v2"
 
+	"github.com/crowdsecurity/go-cs-lib/cstest"
+	"github.com/crowdsecurity/go-cs-lib/ptr"
+	"github.com/crowdsecurity/go-cs-lib/version"
+
 	"github.com/crowdsecurity/crowdsec/pkg/apiclient"
 	"github.com/crowdsecurity/crowdsec/pkg/csconfig"
-	"github.com/crowdsecurity/crowdsec/pkg/cstest"
-	"github.com/crowdsecurity/crowdsec/pkg/cwversion"
 	"github.com/crowdsecurity/crowdsec/pkg/database"
 	"github.com/crowdsecurity/crowdsec/pkg/database/ent/decision"
 	"github.com/crowdsecurity/crowdsec/pkg/database/ent/machine"
 	"github.com/crowdsecurity/crowdsec/pkg/models"
+	"github.com/crowdsecurity/crowdsec/pkg/modelscapi"
 	"github.com/crowdsecurity/crowdsec/pkg/types"
 )
 
-func getDBClient(t *testing.T) *database.Client {
+func getDBClient(t *testing.T, ctx context.Context) *database.Client {
 	t.Helper()
+
 	dbPath, err := os.CreateTemp("", "*sqlite")
 	require.NoError(t, err)
-	dbClient, err := database.NewClient(&csconfig.DatabaseCfg{
+	dbClient, err := database.NewClient(ctx, &csconfig.DatabaseCfg{
 		Type:   "sqlite",
 		DbName: "crowdsec",
 		DbPath: dbPath.Name(),
 	})
 	require.NoError(t, err)
+
 	return dbClient
 }
 
-func getAPIC(t *testing.T) *apic {
+func getAPIC(t *testing.T, ctx context.Context) *apic {
 	t.Helper()
-	dbClient := getDBClient(t)
+	dbClient := getDBClient(t, ctx)
+
 	return &apic{
-		alertToPush:  make(chan []*models.Alert),
+		AlertsAddChan: make(chan []*models.Alert),
+		// DecisionDeleteChan: make(chan []*models.Decision),
 		dbClient:     dbClient,
 		mu:           sync.Mutex{},
 		startup:      true,
@@ -55,22 +64,29 @@ func getAPIC(t *testing.T) *apic {
 		metricsTomb:  tomb.Tomb{},
 		scenarioList: make([]string, 0),
 		consoleConfig: &csconfig.ConsoleConfig{
-			ShareManualDecisions:  types.BoolPtr(false),
-			ShareTaintedScenarios: types.BoolPtr(false),
-			ShareCustomScenarios:  types.BoolPtr(false),
+			ShareManualDecisions:  ptr.Of(false),
+			ShareTaintedScenarios: ptr.Of(false),
+			ShareCustomScenarios:  ptr.Of(false),
+			ShareContext:          ptr.Of(false),
 		},
+		isPulling:      make(chan bool, 1),
+		shareSignals:   true,
+		pullBlocklists: true,
+		pullCommunity:  true,
 	}
 }
 
-func absDiff(a int, b int) (c int) {
-	if c = a - b; c < 0 {
+func absDiff(a int, b int) int {
+	c := a - b
+	if c < 0 {
 		return -1 * c
 	}
+
 	return c
 }
 
-func assertTotalDecisionCount(t *testing.T, dbClient *database.Client, count int) {
-	d := dbClient.Ent.Decision.Query().AllX(context.Background())
+func assertTotalDecisionCount(t *testing.T, ctx context.Context, dbClient *database.Client, count int) {
+	d := dbClient.Ent.Decision.Query().AllX(ctx)
 	assert.Len(t, d, count)
 }
 
@@ -86,6 +102,7 @@ func jsonMarshalX(v interface{}) []byte {
 	if err != nil {
 		panic(err)
 	}
+
 	return data
 }
 
@@ -95,9 +112,10 @@ func assertTotalAlertCount(t *testing.T, dbClient *database.Client, count int) {
 }
 
 func TestAPICCAPIPullIsOld(t *testing.T) {
-	api := getAPIC(t)
+	ctx := context.Background()
+	api := getAPIC(t, ctx)
 
-	isOld, err := api.CAPIPullIsOld()
+	isOld, err := api.CAPIPullIsOld(ctx)
 	require.NoError(t, err)
 	assert.True(t, isOld)
 
@@ -107,8 +125,8 @@ func TestAPICCAPIPullIsOld(t *testing.T) {
 		SetType("IP").
 		SetScope("Country").
 		SetValue("Blah").
-		SetOrigin(SCOPE_CAPI).
-		SaveX(context.Background())
+		SetOrigin(types.CAPIOrigin).
+		SaveX(ctx)
 
 	api.dbClient.Ent.Alert.Create().
 		SetCreatedAt(time.Now()).
@@ -116,15 +134,17 @@ func TestAPICCAPIPullIsOld(t *testing.T) {
 		AddDecisions(
 			decision,
 		).
-		SaveX(context.Background())
+		SaveX(ctx)
 
-	isOld, err = api.CAPIPullIsOld()
+	isOld, err = api.CAPIPullIsOld(ctx)
 	require.NoError(t, err)
 
 	assert.False(t, isOld)
 }
 
 func TestAPICFetchScenariosListFromDB(t *testing.T) {
+	ctx := context.Background()
+
 	tests := []struct {
 		name                    string
 		machineIDsWithScenarios map[string]string
@@ -148,45 +168,54 @@ func TestAPICFetchScenariosListFromDB(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			api := getAPIC(t)
+			api := getAPIC(t, ctx)
 			for machineID, scenarios := range tc.machineIDsWithScenarios {
 				api.dbClient.Ent.Machine.Create().
 					SetMachineId(machineID).
 					SetPassword(testPassword.String()).
 					SetIpAddress("1.2.3.4").
 					SetScenarios(scenarios).
-					ExecX(context.Background())
+					ExecX(ctx)
 			}
 
-			scenarios, err := api.FetchScenariosListFromDB()
-			for machineID := range tc.machineIDsWithScenarios {
-				api.dbClient.Ent.Machine.Delete().Where(machine.MachineIdEQ(machineID)).ExecX(context.Background())
-			}
+			scenarios, err := api.FetchScenariosListFromDB(ctx)
 			require.NoError(t, err)
+
+			for machineID := range tc.machineIDsWithScenarios {
+				api.dbClient.Ent.Machine.Delete().Where(machine.MachineIdEQ(machineID)).ExecX(ctx)
+			}
 
 			assert.ElementsMatch(t, tc.expectedScenarios, scenarios)
 		})
-
 	}
 }
 
 func TestNewAPIC(t *testing.T) {
+	ctx := context.Background()
+
 	var testConfig *csconfig.OnlineApiClientCfg
+
 	setConfig := func() {
 		testConfig = &csconfig.OnlineApiClientCfg{
 			Credentials: &csconfig.ApiCredentialsCfg{
-				URL:      "foobar",
+				URL:      "http://foobar/",
 				Login:    "foo",
 				Password: "bar",
 			},
+			Sharing: ptr.Of(true),
+			PullConfig: csconfig.CapiPullConfig{
+				Community:  ptr.Of(true),
+				Blocklists: ptr.Of(true),
+			},
 		}
 	}
+
 	type args struct {
 		dbClient      *database.Client
 		consoleConfig *csconfig.ConsoleConfig
 	}
+
 	tests := []struct {
 		name        string
 		args        args
@@ -197,72 +226,49 @@ func TestNewAPIC(t *testing.T) {
 			name:   "simple",
 			action: func() {},
 			args: args{
-				dbClient:      getDBClient(t),
-				consoleConfig: LoadTestConfig().API.Server.ConsoleConfig,
+				dbClient:      getDBClient(t, ctx),
+				consoleConfig: LoadTestConfig(t).API.Server.ConsoleConfig,
 			},
 		},
 		{
 			name:   "error in parsing URL",
 			action: func() { testConfig.Credentials.URL = "foobar http://" },
 			args: args{
-				dbClient:      getDBClient(t),
-				consoleConfig: LoadTestConfig().API.Server.ConsoleConfig,
+				dbClient:      getDBClient(t, ctx),
+				consoleConfig: LoadTestConfig(t).API.Server.ConsoleConfig,
 			},
 			expectedErr: "first path segment in URL cannot contain colon",
 		},
 	}
+
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			setConfig()
+			httpmock.Activate()
+
+			defer httpmock.DeactivateAndReset()
+			httpmock.RegisterResponder("POST", "http://foobar/v3/watchers/login", httpmock.NewBytesResponder(
+				200, jsonMarshalX(
+					models.WatcherAuthResponse{
+						Code:   200,
+						Expire: "2023-01-12T22:51:43Z",
+						Token:  "MyToken",
+					},
+				),
+			))
 			tc.action()
-			_, err := NewAPIC(testConfig, tc.args.dbClient, tc.args.consoleConfig)
+			_, err := NewAPIC(ctx, testConfig, tc.args.dbClient, tc.args.consoleConfig, nil)
 			cstest.RequireErrorContains(t, err, tc.expectedErr)
 		})
 	}
 }
 
-func TestAPICHandleDeletedDecisions(t *testing.T) {
-	api := getAPIC(t)
-	_, deleteCounters := makeAddAndDeleteCounters()
-
-	decision1 := api.dbClient.Ent.Decision.Create().
-		SetUntil(time.Now().Add(time.Hour)).
-		SetScenario("crowdsec/test").
-		SetType("ban").
-		SetScope("IP").
-		SetValue("1.2.3.4").
-		SetOrigin(SCOPE_CAPI).
-		SaveX(context.Background())
-
-	api.dbClient.Ent.Decision.Create().
-		SetUntil(time.Now().Add(time.Hour)).
-		SetScenario("crowdsec/test").
-		SetType("ban").
-		SetScope("IP").
-		SetValue("1.2.3.4").
-		SetOrigin(SCOPE_CAPI).
-		SaveX(context.Background())
-
-	assertTotalDecisionCount(t, api.dbClient, 2)
-
-	nbDeleted, err := api.HandleDeletedDecisions([]*models.Decision{{
-		Value:    types.StrPtr("1.2.3.4"),
-		Origin:   &SCOPE_CAPI,
-		Type:     &decision1.Type,
-		Scenario: types.StrPtr("crowdsec/test"),
-		Scope:    types.StrPtr("IP"),
-	}}, deleteCounters)
-
-	assert.NoError(t, err)
-	assert.Equal(t, 2, nbDeleted)
-	assert.Equal(t, 2, deleteCounters[SCOPE_CAPI]["all"])
-}
-
 func TestAPICGetMetrics(t *testing.T) {
+	ctx := context.Background()
+
 	cleanUp := func(api *apic) {
-		api.dbClient.Ent.Bouncer.Delete().ExecX(context.Background())
-		api.dbClient.Ent.Machine.Delete().ExecX(context.Background())
+		api.dbClient.Ent.Bouncer.Delete().ExecX(ctx)
+		api.dbClient.Ent.Machine.Delete().ExecX(ctx)
 	}
 	tests := []struct {
 		name           string
@@ -271,48 +277,59 @@ func TestAPICGetMetrics(t *testing.T) {
 		expectedMetric *models.Metrics
 	}{
 		{
+			name:       "no bouncers nor machines should still have bouncers/machines keys in output",
+			machineIDs: []string{},
+			bouncers:   []string{},
+			expectedMetric: &models.Metrics{
+				ApilVersion: ptr.Of(version.String()),
+				Bouncers:    []*models.MetricsBouncerInfo{},
+				Machines:    []*models.MetricsAgentInfo{},
+			},
+		},
+		{
 			name:       "simple",
 			machineIDs: []string{"a", "b", "c"},
 			bouncers:   []string{"1", "2", "3"},
 			expectedMetric: &models.Metrics{
-				ApilVersion: types.StrPtr(cwversion.VersionStr()),
+				ApilVersion: ptr.Of(version.String()),
 				Bouncers: []*models.MetricsBouncerInfo{
 					{
 						CustomName: "1",
-						LastPull:   time.Time{}.String(),
+						LastPull:   time.Time{}.Format(time.RFC3339),
 					}, {
 						CustomName: "2",
-						LastPull:   time.Time{}.String(),
+						LastPull:   time.Time{}.Format(time.RFC3339),
 					}, {
 						CustomName: "3",
-						LastPull:   time.Time{}.String(),
+						LastPull:   time.Time{}.Format(time.RFC3339),
 					},
 				},
 				Machines: []*models.MetricsAgentInfo{
 					{
 						Name:       "a",
-						LastPush:   time.Time{}.String(),
-						LastUpdate: time.Time{}.String(),
+						LastPush:   time.Time{}.Format(time.RFC3339),
+						LastUpdate: time.Time{}.Format(time.RFC3339),
 					},
 					{
 						Name:       "b",
-						LastPush:   time.Time{}.String(),
-						LastUpdate: time.Time{}.String(),
+						LastPush:   time.Time{}.Format(time.RFC3339),
+						LastUpdate: time.Time{}.Format(time.RFC3339),
 					},
 					{
 						Name:       "c",
-						LastPush:   time.Time{}.String(),
-						LastUpdate: time.Time{}.String(),
+						LastPush:   time.Time{}.Format(time.RFC3339),
+						LastUpdate: time.Time{}.Format(time.RFC3339),
 					},
 				},
 			},
 		},
 	}
+
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			apiClient := getAPIC(t)
+			apiClient := getAPIC(t, ctx)
 			cleanUp(apiClient)
+
 			for i, machineID := range tc.machineIDs {
 				apiClient.dbClient.Ent.Machine.Create().
 					SetMachineId(machineID).
@@ -321,7 +338,7 @@ func TestAPICGetMetrics(t *testing.T) {
 					SetScenarios("crowdsecurity/test").
 					SetLastPush(time.Time{}).
 					SetUpdatedAt(time.Time{}).
-					ExecX(context.Background())
+					ExecX(ctx)
 			}
 
 			for i, bouncerName := range tc.bouncers {
@@ -331,42 +348,43 @@ func TestAPICGetMetrics(t *testing.T) {
 					SetAPIKey("foobar").
 					SetRevoked(false).
 					SetLastPull(time.Time{}).
-					ExecX(context.Background())
+					ExecX(ctx)
 			}
 
-			foundMetrics, err := apiClient.GetMetrics()
+			foundMetrics, err := apiClient.GetMetrics(ctx)
 			require.NoError(t, err)
 
 			assert.Equal(t, tc.expectedMetric.Bouncers, foundMetrics.Bouncers)
 			assert.Equal(t, tc.expectedMetric.Machines, foundMetrics.Machines)
-
 		})
 	}
 }
 
 func TestCreateAlertsForDecision(t *testing.T) {
 	httpBfDecisionList := &models.Decision{
-		Origin:   &SCOPE_LISTS,
-		Scenario: types.StrPtr("crowdsecurity/http-bf"),
+		Origin:   ptr.Of(types.ListOrigin),
+		Scenario: ptr.Of("crowdsecurity/http-bf"),
 	}
 
 	sshBfDecisionList := &models.Decision{
-		Origin:   &SCOPE_LISTS,
-		Scenario: types.StrPtr("crowdsecurity/ssh-bf"),
+		Origin:   ptr.Of(types.ListOrigin),
+		Scenario: ptr.Of("crowdsecurity/ssh-bf"),
 	}
 
 	httpBfDecisionCommunity := &models.Decision{
-		Origin:   &SCOPE_CAPI,
-		Scenario: types.StrPtr("crowdsecurity/http-bf"),
+		Origin:   ptr.Of(types.CAPIOrigin),
+		Scenario: ptr.Of("crowdsecurity/http-bf"),
 	}
 
 	sshBfDecisionCommunity := &models.Decision{
-		Origin:   &SCOPE_CAPI,
-		Scenario: types.StrPtr("crowdsecurity/ssh-bf"),
+		Origin:   ptr.Of(types.CAPIOrigin),
+		Scenario: ptr.Of("crowdsecurity/ssh-bf"),
 	}
+
 	type args struct {
 		decisions []*models.Decision
 	}
+
 	tests := []struct {
 		name string
 		args args
@@ -413,8 +431,8 @@ func TestCreateAlertsForDecision(t *testing.T) {
 			},
 		},
 	}
+
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			if got := createAlertsForDecisions(tc.args.decisions); !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("createAlertsForDecisions() = %v, want %v", got, tc.want)
@@ -425,32 +443,34 @@ func TestCreateAlertsForDecision(t *testing.T) {
 
 func TestFillAlertsWithDecisions(t *testing.T) {
 	httpBfDecisionCommunity := &models.Decision{
-		Origin:   &SCOPE_CAPI,
-		Scenario: types.StrPtr("crowdsecurity/http-bf"),
-		Scope:    types.StrPtr("ip"),
+		Origin:   ptr.Of(types.CAPIOrigin),
+		Scenario: ptr.Of("crowdsecurity/http-bf"),
+		Scope:    ptr.Of("ip"),
 	}
 
 	sshBfDecisionCommunity := &models.Decision{
-		Origin:   &SCOPE_CAPI,
-		Scenario: types.StrPtr("crowdsecurity/ssh-bf"),
-		Scope:    types.StrPtr("ip"),
+		Origin:   ptr.Of(types.CAPIOrigin),
+		Scenario: ptr.Of("crowdsecurity/ssh-bf"),
+		Scope:    ptr.Of("ip"),
 	}
 
 	httpBfDecisionList := &models.Decision{
-		Origin:   &SCOPE_LISTS,
-		Scenario: types.StrPtr("crowdsecurity/http-bf"),
-		Scope:    types.StrPtr("ip"),
+		Origin:   ptr.Of(types.ListOrigin),
+		Scenario: ptr.Of("crowdsecurity/http-bf"),
+		Scope:    ptr.Of("ip"),
 	}
 
 	sshBfDecisionList := &models.Decision{
-		Origin:   &SCOPE_LISTS,
-		Scenario: types.StrPtr("crowdsecurity/ssh-bf"),
-		Scope:    types.StrPtr("ip"),
+		Origin:   ptr.Of(types.ListOrigin),
+		Scenario: ptr.Of("crowdsecurity/ssh-bf"),
+		Scope:    ptr.Of("ip"),
 	}
+
 	type args struct {
 		alerts    []*models.Alert
 		decisions []*models.Decision
 	}
+
 	tests := []struct {
 		name string
 		args args
@@ -490,8 +510,8 @@ func TestFillAlertsWithDecisions(t *testing.T) {
 			},
 		},
 	}
+
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			addCounters, _ := makeAddAndDeleteCounters()
 			if got := fillAlertsWithDecisions(tc.args.alerts, tc.args.decisions, addCounters); !reflect.DeepEqual(got, tc.want) {
@@ -501,94 +521,289 @@ func TestFillAlertsWithDecisions(t *testing.T) {
 	}
 }
 
-func TestAPICPullTop(t *testing.T) {
-	api := getAPIC(t)
+func TestAPICWhitelists(t *testing.T) {
+	ctx := context.Background()
+	api := getAPIC(t, ctx)
+	// one whitelist on IP, one on CIDR
+	api.whitelists = &csconfig.CapiWhitelist{}
+	api.whitelists.Ips = append(api.whitelists.Ips, net.ParseIP("9.2.3.4"), net.ParseIP("7.2.3.4"))
+
+	_, tnet, err := net.ParseCIDR("13.2.3.0/24")
+	require.NoError(t, err)
+
+	api.whitelists.Cidrs = append(api.whitelists.Cidrs, tnet)
+
+	_, tnet, err = net.ParseCIDR("11.2.3.0/24")
+	require.NoError(t, err)
+
+	api.whitelists.Cidrs = append(api.whitelists.Cidrs, tnet)
+
 	api.dbClient.Ent.Decision.Create().
-		SetOrigin(SCOPE_LISTS).
+		SetOrigin(types.CAPIOrigin).
 		SetType("ban").
 		SetValue("9.9.9.9").
 		SetScope("Ip").
 		SetScenario("crowdsecurity/ssh-bf").
 		SetUntil(time.Now().Add(time.Hour)).
 		ExecX(context.Background())
-	assertTotalDecisionCount(t, api.dbClient, 1)
+	assertTotalDecisionCount(t, ctx, api.dbClient, 1)
 	assertTotalValidDecisionCount(t, api.dbClient, 1)
 	httpmock.Activate()
+
 	defer httpmock.DeactivateAndReset()
 	httpmock.RegisterResponder("GET", "http://api.crowdsec.net/api/decisions/stream", httpmock.NewBytesResponder(
 		200, jsonMarshalX(
-			models.DecisionsStreamResponse{
-				Deleted: models.GetDecisionsResponse{
-					&models.Decision{
-						Origin:   &SCOPE_LISTS,
-						Scenario: types.StrPtr("crowdsecurity/ssh-bf"),
-						Value:    types.StrPtr("9.9.9.9"),
-						Scope:    types.StrPtr("Ip"),
-						Duration: types.StrPtr("24h"),
-						Type:     types.StrPtr("ban"),
+			modelscapi.GetDecisionsStreamResponse{
+				Deleted: modelscapi.GetDecisionsStreamResponseDeleted{
+					&modelscapi.GetDecisionsStreamResponseDeletedItem{
+						Decisions: []string{
+							"9.9.9.9", // This is already present in DB
+							"9.1.9.9", // This is not present in DB
+						},
+						Scope: ptr.Of("Ip"),
 					}, // This is already present in DB
-					&models.Decision{
-						Origin:   &SCOPE_LISTS,
-						Scenario: types.StrPtr("crowdsecurity/ssh-bf"),
-						Value:    types.StrPtr("9.1.9.9"),
-						Scope:    types.StrPtr("Ip"),
-						Duration: types.StrPtr("24h"),
-						Type:     types.StrPtr("ban"),
-					}, // This not present in DB.
 				},
-				New: models.GetDecisionsResponse{
-					&models.Decision{
-						Origin:   &SCOPE_CAPI,
-						Scenario: types.StrPtr("crowdsecurity/test1"),
-						Value:    types.StrPtr("1.2.3.4"),
-						Scope:    types.StrPtr("Ip"),
-						Duration: types.StrPtr("24h"),
-						Type:     types.StrPtr("ban"),
+				New: modelscapi.GetDecisionsStreamResponseNew{
+					&modelscapi.GetDecisionsStreamResponseNewItem{
+						Scenario: ptr.Of("crowdsecurity/test1"),
+						Scope:    ptr.Of("Ip"),
+						Decisions: []*modelscapi.GetDecisionsStreamResponseNewItemDecisionsItems0{
+							{
+								Value:    ptr.Of("13.2.3.4"), // wl by cidr
+								Duration: ptr.Of("24h"),
+							},
+						},
 					},
-					&models.Decision{
-						Origin:   &SCOPE_CAPI,
-						Scenario: types.StrPtr("crowdsecurity/test2"),
-						Value:    types.StrPtr("1.2.3.5"),
-						Scope:    types.StrPtr("Ip"),
-						Duration: types.StrPtr("24h"),
-						Type:     types.StrPtr("ban"),
+
+					&modelscapi.GetDecisionsStreamResponseNewItem{
+						Scenario: ptr.Of("crowdsecurity/test1"),
+						Scope:    ptr.Of("Ip"),
+						Decisions: []*modelscapi.GetDecisionsStreamResponseNewItemDecisionsItems0{
+							{
+								Value:    ptr.Of("2.2.3.4"),
+								Duration: ptr.Of("24h"),
+							},
+						},
+					},
+					&modelscapi.GetDecisionsStreamResponseNewItem{
+						Scenario: ptr.Of("crowdsecurity/test2"),
+						Scope:    ptr.Of("Ip"),
+						Decisions: []*modelscapi.GetDecisionsStreamResponseNewItemDecisionsItems0{
+							{
+								Value:    ptr.Of("13.2.3.5"), // wl by cidr
+								Duration: ptr.Of("24h"),
+							},
+						},
 					}, // These two are from community list.
-					&models.Decision{
-						Origin:   &SCOPE_LISTS,
-						Scenario: types.StrPtr("crowdsecurity/http-bf"),
-						Value:    types.StrPtr("1.2.3.6"),
-						Scope:    types.StrPtr("Ip"),
-						Duration: types.StrPtr("24h"),
-						Type:     types.StrPtr("ban"),
+					&modelscapi.GetDecisionsStreamResponseNewItem{
+						Scenario: ptr.Of("crowdsecurity/test1"),
+						Scope:    ptr.Of("Ip"),
+						Decisions: []*modelscapi.GetDecisionsStreamResponseNewItemDecisionsItems0{
+							{
+								Value:    ptr.Of("6.2.3.4"),
+								Duration: ptr.Of("24h"),
+							},
+						},
 					},
-					&models.Decision{
-						Origin:   &SCOPE_LISTS,
-						Scenario: types.StrPtr("crowdsecurity/ssh-bf"),
-						Value:    types.StrPtr("1.2.3.7"),
-						Scope:    types.StrPtr("Ip"),
-						Duration: types.StrPtr("24h"),
-						Type:     types.StrPtr("ban"),
-					}, // These two are from list subscription.
+					&modelscapi.GetDecisionsStreamResponseNewItem{
+						Scenario: ptr.Of("crowdsecurity/test1"),
+						Scope:    ptr.Of("Ip"),
+						Decisions: []*modelscapi.GetDecisionsStreamResponseNewItemDecisionsItems0{
+							{
+								Value:    ptr.Of("9.2.3.4"), // wl by ip
+								Duration: ptr.Of("24h"),
+							},
+						},
+					},
+				},
+				Links: &modelscapi.GetDecisionsStreamResponseLinks{
+					Blocklists: []*modelscapi.BlocklistLink{
+						{
+							URL:         ptr.Of("http://api.crowdsec.net/blocklist1"),
+							Name:        ptr.Of("blocklist1"),
+							Scope:       ptr.Of("Ip"),
+							Remediation: ptr.Of("ban"),
+							Duration:    ptr.Of("24h"),
+						},
+						{
+							URL:         ptr.Of("http://api.crowdsec.net/blocklist2"),
+							Name:        ptr.Of("blocklist2"),
+							Scope:       ptr.Of("Ip"),
+							Remediation: ptr.Of("ban"),
+							Duration:    ptr.Of("24h"),
+						},
+					},
 				},
 			},
 		),
 	))
+
+	httpmock.RegisterResponder("GET", "http://api.crowdsec.net/blocklist1", httpmock.NewStringResponder(
+		200, "1.2.3.6",
+	))
+
+	httpmock.RegisterResponder("GET", "http://api.crowdsec.net/blocklist2", httpmock.NewStringResponder(
+		200, "1.2.3.7",
+	))
+
 	url, err := url.ParseRequestURI("http://api.crowdsec.net/")
 	require.NoError(t, err)
 
 	apic, err := apiclient.NewDefaultClient(
 		url,
 		"/api",
-		fmt.Sprintf("crowdsec/%s", cwversion.VersionStr()),
+		"",
 		nil,
 	)
 	require.NoError(t, err)
 
 	api.apiClient = apic
-	err = api.PullTop()
+	err = api.PullTop(ctx, false)
 	require.NoError(t, err)
 
-	assertTotalDecisionCount(t, api.dbClient, 5)
+	assertTotalDecisionCount(t, ctx, api.dbClient, 5) // 2 from FIRE + 2 from bl + 1 existing
+	assertTotalValidDecisionCount(t, api.dbClient, 4)
+	assertTotalAlertCount(t, api.dbClient, 3) // 2 for list sub , 1 for community list.
+	alerts := api.dbClient.Ent.Alert.Query().AllX(context.Background())
+	validDecisions := api.dbClient.Ent.Decision.Query().Where(
+		decision.UntilGT(time.Now())).
+		AllX(context.Background())
+
+	decisionScenarioFreq := make(map[string]int)
+	decisionIP := make(map[string]int)
+
+	alertScenario := make(map[string]int)
+
+	for _, alert := range alerts {
+		alertScenario[alert.SourceScope]++
+	}
+
+	assert.Len(t, alertScenario, 3)
+	assert.Equal(t, 1, alertScenario[types.CommunityBlocklistPullSourceScope])
+	assert.Equal(t, 1, alertScenario["lists:blocklist1"])
+	assert.Equal(t, 1, alertScenario["lists:blocklist2"])
+
+	for _, decisions := range validDecisions {
+		decisionScenarioFreq[decisions.Scenario]++
+		decisionIP[decisions.Value]++
+	}
+
+	assert.Equal(t, 1, decisionIP["2.2.3.4"], 1)
+	assert.Equal(t, 1, decisionIP["6.2.3.4"], 1)
+
+	if _, ok := decisionIP["13.2.3.4"]; ok {
+		t.Errorf("13.2.3.4 is whitelisted")
+	}
+
+	if _, ok := decisionIP["13.2.3.5"]; ok {
+		t.Errorf("13.2.3.5 is whitelisted")
+	}
+
+	if _, ok := decisionIP["9.2.3.4"]; ok {
+		t.Errorf("9.2.3.4 is whitelisted")
+	}
+
+	assert.Equal(t, 1, decisionScenarioFreq["blocklist1"], 1)
+	assert.Equal(t, 1, decisionScenarioFreq["blocklist2"], 1)
+	assert.Equal(t, 2, decisionScenarioFreq["crowdsecurity/test1"], 2)
+}
+
+func TestAPICPullTop(t *testing.T) {
+	ctx := context.Background()
+	api := getAPIC(t, ctx)
+	api.dbClient.Ent.Decision.Create().
+		SetOrigin(types.CAPIOrigin).
+		SetType("ban").
+		SetValue("9.9.9.9").
+		SetScope("Ip").
+		SetScenario("crowdsecurity/ssh-bf").
+		SetUntil(time.Now().Add(time.Hour)).
+		ExecX(ctx)
+	assertTotalDecisionCount(t, ctx, api.dbClient, 1)
+	assertTotalValidDecisionCount(t, api.dbClient, 1)
+	httpmock.Activate()
+
+	defer httpmock.DeactivateAndReset()
+	httpmock.RegisterResponder("GET", "http://api.crowdsec.net/api/decisions/stream", httpmock.NewBytesResponder(
+		200, jsonMarshalX(
+			modelscapi.GetDecisionsStreamResponse{
+				Deleted: modelscapi.GetDecisionsStreamResponseDeleted{
+					&modelscapi.GetDecisionsStreamResponseDeletedItem{
+						Decisions: []string{
+							"9.9.9.9", // This is already present in DB
+							"9.1.9.9", // This is not present in DB
+						},
+						Scope: ptr.Of("Ip"),
+					}, // This is already present in DB
+				},
+				New: modelscapi.GetDecisionsStreamResponseNew{
+					&modelscapi.GetDecisionsStreamResponseNewItem{
+						Scenario: ptr.Of("crowdsecurity/test1"),
+						Scope:    ptr.Of("Ip"),
+						Decisions: []*modelscapi.GetDecisionsStreamResponseNewItemDecisionsItems0{
+							{
+								Value:    ptr.Of("1.2.3.4"),
+								Duration: ptr.Of("24h"),
+							},
+						},
+					},
+					&modelscapi.GetDecisionsStreamResponseNewItem{
+						Scenario: ptr.Of("crowdsecurity/test2"),
+						Scope:    ptr.Of("Ip"),
+						Decisions: []*modelscapi.GetDecisionsStreamResponseNewItemDecisionsItems0{
+							{
+								Value:    ptr.Of("1.2.3.5"),
+								Duration: ptr.Of("24h"),
+							},
+						},
+					}, // These two are from community list.
+				},
+				Links: &modelscapi.GetDecisionsStreamResponseLinks{
+					Blocklists: []*modelscapi.BlocklistLink{
+						{
+							URL:         ptr.Of("http://api.crowdsec.net/blocklist1"),
+							Name:        ptr.Of("blocklist1"),
+							Scope:       ptr.Of("Ip"),
+							Remediation: ptr.Of("ban"),
+							Duration:    ptr.Of("24h"),
+						},
+						{
+							URL:         ptr.Of("http://api.crowdsec.net/blocklist2"),
+							Name:        ptr.Of("blocklist2"),
+							Scope:       ptr.Of("Ip"),
+							Remediation: ptr.Of("ban"),
+							Duration:    ptr.Of("24h"),
+						},
+					},
+				},
+			},
+		),
+	))
+
+	httpmock.RegisterResponder("GET", "http://api.crowdsec.net/blocklist1", httpmock.NewStringResponder(
+		200, "1.2.3.6",
+	))
+
+	httpmock.RegisterResponder("GET", "http://api.crowdsec.net/blocklist2", httpmock.NewStringResponder(
+		200, "1.2.3.7",
+	))
+
+	url, err := url.ParseRequestURI("http://api.crowdsec.net/")
+	require.NoError(t, err)
+
+	apic, err := apiclient.NewDefaultClient(
+		url,
+		"/api",
+		"",
+		nil,
+	)
+	require.NoError(t, err)
+
+	api.apiClient = apic
+	err = api.PullTop(ctx, false)
+	require.NoError(t, err)
+
+	assertTotalDecisionCount(t, ctx, api.dbClient, 5)
 	assertTotalValidDecisionCount(t, api.dbClient, 4)
 	assertTotalAlertCount(t, api.dbClient, 3) // 2 for list sub , 1 for community list.
 	alerts := api.dbClient.Ent.Alert.Query().AllX(context.Background())
@@ -602,22 +817,210 @@ func TestAPICPullTop(t *testing.T) {
 	for _, alert := range alerts {
 		alertScenario[alert.SourceScope]++
 	}
-	assert.Equal(t, 3, len(alertScenario))
-	assert.Equal(t, 1, alertScenario[SCOPE_CAPI_ALIAS])
-	assert.Equal(t, 1, alertScenario["lists:crowdsecurity/ssh-bf"])
-	assert.Equal(t, 1, alertScenario["lists:crowdsecurity/http-bf"])
+
+	assert.Len(t, alertScenario, 3)
+	assert.Equal(t, 1, alertScenario[types.CommunityBlocklistPullSourceScope])
+	assert.Equal(t, 1, alertScenario["lists:blocklist1"])
+	assert.Equal(t, 1, alertScenario["lists:blocklist2"])
 
 	for _, decisions := range validDecisions {
 		decisionScenarioFreq[decisions.Scenario]++
 	}
 
-	assert.Equal(t, 1, decisionScenarioFreq["crowdsecurity/http-bf"], 1)
-	assert.Equal(t, 1, decisionScenarioFreq["crowdsecurity/ssh-bf"], 1)
+	assert.Equal(t, 1, decisionScenarioFreq["blocklist1"], 1)
+	assert.Equal(t, 1, decisionScenarioFreq["blocklist2"], 1)
 	assert.Equal(t, 1, decisionScenarioFreq["crowdsecurity/test1"], 1)
 	assert.Equal(t, 1, decisionScenarioFreq["crowdsecurity/test2"], 1)
 }
 
+func TestAPICPullTopBLCacheFirstCall(t *testing.T) {
+	ctx := context.Background()
+	// no decision in db, no last modified parameter.
+	api := getAPIC(t, ctx)
+
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	httpmock.RegisterResponder("GET", "http://api.crowdsec.net/api/decisions/stream", httpmock.NewBytesResponder(
+		200, jsonMarshalX(
+			modelscapi.GetDecisionsStreamResponse{
+				New: modelscapi.GetDecisionsStreamResponseNew{
+					&modelscapi.GetDecisionsStreamResponseNewItem{
+						Scenario: ptr.Of("crowdsecurity/test1"),
+						Scope:    ptr.Of("Ip"),
+						Decisions: []*modelscapi.GetDecisionsStreamResponseNewItemDecisionsItems0{
+							{
+								Value:    ptr.Of("1.2.3.4"),
+								Duration: ptr.Of("24h"),
+							},
+						},
+					},
+				},
+				Links: &modelscapi.GetDecisionsStreamResponseLinks{
+					Blocklists: []*modelscapi.BlocklistLink{
+						{
+							URL:         ptr.Of("http://api.crowdsec.net/blocklist1"),
+							Name:        ptr.Of("blocklist1"),
+							Scope:       ptr.Of("Ip"),
+							Remediation: ptr.Of("ban"),
+							Duration:    ptr.Of("24h"),
+						},
+					},
+				},
+			},
+		),
+	))
+
+	httpmock.RegisterResponder("GET", "http://api.crowdsec.net/blocklist1", func(req *http.Request) (*http.Response, error) {
+		assert.Equal(t, "", req.Header.Get("If-Modified-Since"))
+		return httpmock.NewStringResponse(200, "1.2.3.4"), nil
+	})
+
+	url, err := url.ParseRequestURI("http://api.crowdsec.net/")
+	require.NoError(t, err)
+
+	apic, err := apiclient.NewDefaultClient(
+		url,
+		"/api",
+		"",
+		nil,
+	)
+	require.NoError(t, err)
+
+	api.apiClient = apic
+	err = api.PullTop(ctx, false)
+	require.NoError(t, err)
+
+	blocklistConfigItemName := "blocklist:blocklist1:last_pull"
+	lastPullTimestamp, err := api.dbClient.GetConfigItem(ctx, blocklistConfigItemName)
+	require.NoError(t, err)
+	assert.NotEqual(t, "", *lastPullTimestamp)
+
+	// new call should return 304 and should not change lastPullTimestamp
+	httpmock.RegisterResponder("GET", "http://api.crowdsec.net/blocklist1", func(req *http.Request) (*http.Response, error) {
+		assert.NotEqual(t, "", req.Header.Get("If-Modified-Since"))
+		return httpmock.NewStringResponse(304, ""), nil
+	})
+
+	err = api.PullTop(ctx, false)
+	require.NoError(t, err)
+	secondLastPullTimestamp, err := api.dbClient.GetConfigItem(ctx, blocklistConfigItemName)
+	require.NoError(t, err)
+	assert.Equal(t, *lastPullTimestamp, *secondLastPullTimestamp)
+}
+
+func TestAPICPullTopBLCacheForceCall(t *testing.T) {
+	ctx := context.Background()
+	api := getAPIC(t, ctx)
+
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	// create a decision about to expire. It should force fetch
+	alertInstance := api.dbClient.Ent.Alert.
+		Create().
+		SetScenario("update list").
+		SetSourceScope("list:blocklist1").
+		SetSourceValue("list:blocklist1").
+		SaveX(context.Background())
+
+	api.dbClient.Ent.Decision.Create().
+		SetOrigin(types.ListOrigin).
+		SetType("ban").
+		SetValue("9.9.9.9").
+		SetScope("Ip").
+		SetScenario("blocklist1").
+		SetUntil(time.Now().Add(time.Hour)).
+		SetOwnerID(alertInstance.ID).
+		ExecX(context.Background())
+
+	httpmock.RegisterResponder("GET", "http://api.crowdsec.net/api/decisions/stream", httpmock.NewBytesResponder(
+		200, jsonMarshalX(
+			modelscapi.GetDecisionsStreamResponse{
+				New: modelscapi.GetDecisionsStreamResponseNew{
+					&modelscapi.GetDecisionsStreamResponseNewItem{
+						Scenario: ptr.Of("crowdsecurity/test1"),
+						Scope:    ptr.Of("Ip"),
+						Decisions: []*modelscapi.GetDecisionsStreamResponseNewItemDecisionsItems0{
+							{
+								Value:    ptr.Of("1.2.3.4"),
+								Duration: ptr.Of("24h"),
+							},
+						},
+					},
+				},
+				Links: &modelscapi.GetDecisionsStreamResponseLinks{
+					Blocklists: []*modelscapi.BlocklistLink{
+						{
+							URL:         ptr.Of("http://api.crowdsec.net/blocklist1"),
+							Name:        ptr.Of("blocklist1"),
+							Scope:       ptr.Of("Ip"),
+							Remediation: ptr.Of("ban"),
+							Duration:    ptr.Of("24h"),
+						},
+					},
+				},
+			},
+		),
+	))
+
+	httpmock.RegisterResponder("GET", "http://api.crowdsec.net/blocklist1", func(req *http.Request) (*http.Response, error) {
+		assert.Equal(t, "", req.Header.Get("If-Modified-Since"))
+		return httpmock.NewStringResponse(304, ""), nil
+	})
+
+	url, err := url.ParseRequestURI("http://api.crowdsec.net/")
+	require.NoError(t, err)
+
+	apic, err := apiclient.NewDefaultClient(
+		url,
+		"/api",
+		"",
+		nil,
+	)
+	require.NoError(t, err)
+
+	api.apiClient = apic
+	err = api.PullTop(ctx, false)
+	require.NoError(t, err)
+}
+
+func TestAPICPullBlocklistCall(t *testing.T) {
+	ctx := context.Background()
+	api := getAPIC(t, ctx)
+
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	httpmock.RegisterResponder("GET", "http://api.crowdsec.net/blocklist1", func(req *http.Request) (*http.Response, error) {
+		assert.Equal(t, "", req.Header.Get("If-Modified-Since"))
+		return httpmock.NewStringResponse(200, "1.2.3.4"), nil
+	})
+
+	url, err := url.ParseRequestURI("http://api.crowdsec.net/")
+	require.NoError(t, err)
+
+	apic, err := apiclient.NewDefaultClient(
+		url,
+		"/api",
+		"",
+		nil,
+	)
+	require.NoError(t, err)
+
+	api.apiClient = apic
+	err = api.PullBlocklist(ctx, &modelscapi.BlocklistLink{
+		URL:         ptr.Of("http://api.crowdsec.net/blocklist1"),
+		Name:        ptr.Of("blocklist1"),
+		Scope:       ptr.Of("Ip"),
+		Remediation: ptr.Of("ban"),
+		Duration:    ptr.Of("24h"),
+	}, true)
+	require.NoError(t, err)
+}
+
 func TestAPICPush(t *testing.T) {
+	ctx := context.Background()
 	tests := []struct {
 		name          string
 		alerts        []*models.Alert
@@ -627,10 +1030,11 @@ func TestAPICPush(t *testing.T) {
 			name: "simple single alert",
 			alerts: []*models.Alert{
 				{
-					Scenario:        types.StrPtr("crowdsec/test"),
-					ScenarioHash:    types.StrPtr("certified"),
-					ScenarioVersion: types.StrPtr("v1.0"),
-					Simulated:       types.BoolPtr(false),
+					Scenario:        ptr.Of("crowdsec/test"),
+					ScenarioHash:    ptr.Of("certified"),
+					ScenarioVersion: ptr.Of("v1.0"),
+					Simulated:       ptr.Of(false),
+					Source:          &models.Source{},
 				},
 			},
 			expectedCalls: 1,
@@ -639,10 +1043,11 @@ func TestAPICPush(t *testing.T) {
 			name: "simulated alert is not pushed",
 			alerts: []*models.Alert{
 				{
-					Scenario:        types.StrPtr("crowdsec/test"),
-					ScenarioHash:    types.StrPtr("certified"),
-					ScenarioVersion: types.StrPtr("v1.0"),
-					Simulated:       types.BoolPtr(true),
+					Scenario:        ptr.Of("crowdsec/test"),
+					ScenarioHash:    ptr.Of("certified"),
+					ScenarioVersion: ptr.Of("v1.0"),
+					Simulated:       ptr.Of(true),
+					Source:          &models.Source{},
 				},
 			},
 			expectedCalls: 0,
@@ -652,23 +1057,24 @@ func TestAPICPush(t *testing.T) {
 			expectedCalls: 2,
 			alerts: func() []*models.Alert {
 				alerts := make([]*models.Alert, 100)
-				for i := 0; i < 100; i++ {
+				for i := range 100 {
 					alerts[i] = &models.Alert{
-						Scenario:        types.StrPtr("crowdsec/test"),
-						ScenarioHash:    types.StrPtr("certified"),
-						ScenarioVersion: types.StrPtr("v1.0"),
-						Simulated:       types.BoolPtr(false),
+						Scenario:        ptr.Of("crowdsec/test"),
+						ScenarioHash:    ptr.Of("certified"),
+						ScenarioVersion: ptr.Of("v1.0"),
+						Simulated:       ptr.Of(false),
+						Source:          &models.Source{},
 					}
 				}
+
 				return alerts
 			}(),
 		},
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			api := getAPIC(t)
+			api := getAPIC(t, ctx)
 			api.pushInterval = time.Millisecond
 			api.pushIntervalFirst = time.Millisecond
 			url, err := url.ParseRequestURI("http://api.crowdsec.net/")
@@ -676,114 +1082,38 @@ func TestAPICPush(t *testing.T) {
 
 			httpmock.Activate()
 			defer httpmock.DeactivateAndReset()
+
 			apic, err := apiclient.NewDefaultClient(
 				url,
 				"/api",
-				fmt.Sprintf("crowdsec/%s", cwversion.VersionStr()),
+				"",
 				nil,
 			)
 			require.NoError(t, err)
 
 			api.apiClient = apic
+
 			httpmock.RegisterResponder("POST", "http://api.crowdsec.net/api/signals", httpmock.NewBytesResponder(200, []byte{}))
+
+			// capture the alerts to avoid datarace
+			alerts := tc.alerts
 			go func() {
-				api.alertToPush <- tc.alerts
+				api.AlertsAddChan <- alerts
+
 				time.Sleep(time.Second)
 				api.Shutdown()
 			}()
-			err = api.Push()
+
+			err = api.Push(ctx)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expectedCalls, httpmock.GetTotalCallCount())
 		})
 	}
 }
 
-func TestAPICSendMetrics(t *testing.T) {
-	tests := []struct {
-		name            string
-		duration        time.Duration
-		expectedCalls   int
-		setUp           func(*apic)
-		metricsInterval time.Duration
-	}{
-		{
-			name:            "basic",
-			duration:        time.Millisecond * 30,
-			metricsInterval: time.Millisecond * 5,
-			expectedCalls:   5,
-			setUp:           func(api *apic) {},
-		},
-		{
-			name:            "with some metrics",
-			duration:        time.Millisecond * 30,
-			metricsInterval: time.Millisecond * 5,
-			expectedCalls:   5,
-			setUp: func(api *apic) {
-				api.dbClient.Ent.Machine.Delete().ExecX(context.Background())
-				api.dbClient.Ent.Machine.Create().
-					SetMachineId("1234").
-					SetPassword(testPassword.String()).
-					SetIpAddress("1.2.3.4").
-					SetScenarios("crowdsecurity/test").
-					SetLastPush(time.Time{}).
-					SetUpdatedAt(time.Time{}).
-					ExecX(context.Background())
-
-				api.dbClient.Ent.Bouncer.Delete().ExecX(context.Background())
-				api.dbClient.Ent.Bouncer.Create().
-					SetIPAddress("1.2.3.6").
-					SetName("someBouncer").
-					SetAPIKey("foobar").
-					SetRevoked(false).
-					SetLastPull(time.Time{}).
-					ExecX(context.Background())
-			},
-		},
-	}
-
-	httpmock.RegisterResponder("POST", "http://api.crowdsec.net/api/metrics/", httpmock.NewBytesResponder(200, []byte{}))
-	httpmock.Activate()
-	defer httpmock.Deactivate()
-
-	for _, tc := range tests {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			url, err := url.ParseRequestURI("http://api.crowdsec.net/")
-			require.NoError(t, err)
-
-			apiClient, err := apiclient.NewDefaultClient(
-				url,
-				"/api",
-				fmt.Sprintf("crowdsec/%s", cwversion.VersionStr()),
-				nil,
-			)
-			require.NoError(t, err)
-
-			api := getAPIC(t)
-			api.pushInterval = time.Millisecond
-			api.pushIntervalFirst = time.Millisecond
-			api.apiClient = apiClient
-			api.metricsInterval = tc.metricsInterval
-			api.metricsIntervalFirst = tc.metricsInterval
-			tc.setUp(api)
-
-			stop := make(chan bool)
-			httpmock.ZeroCallCounters()
-			go api.SendMetrics(stop)
-			time.Sleep(tc.duration)
-			stop <- true
-
-			info := httpmock.GetCallCountInfo()
-			noResponderCalls := info["NO_RESPONDER"]
-			responderCalls := info["POST http://api.crowdsec.net/api/metrics/"]
-			assert.LessOrEqual(t, absDiff(tc.expectedCalls, responderCalls), 2)
-			assert.Zero(t, noResponderCalls)
-		})
-	}
-}
-
 func TestAPICPull(t *testing.T) {
-	api := getAPIC(t)
+	ctx := context.Background()
+	api := getAPIC(t, ctx)
 	tests := []struct {
 		name                  string
 		setUp                 func()
@@ -810,50 +1140,59 @@ func TestAPICPull(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			api = getAPIC(t)
+			api = getAPIC(t, ctx)
 			api.pullInterval = time.Millisecond
 			api.pullIntervalFirst = time.Millisecond
 			url, err := url.ParseRequestURI("http://api.crowdsec.net/")
 			require.NoError(t, err)
 			httpmock.Activate()
+
 			defer httpmock.DeactivateAndReset()
+
 			apic, err := apiclient.NewDefaultClient(
 				url,
 				"/api",
-				fmt.Sprintf("crowdsec/%s", cwversion.VersionStr()),
+				"",
 				nil,
 			)
 			require.NoError(t, err)
+
 			api.apiClient = apic
+
 			httpmock.RegisterNoResponder(httpmock.NewBytesResponder(200, jsonMarshalX(
-				models.DecisionsStreamResponse{
-					New: models.GetDecisionsResponse{
-						&models.Decision{
-							Origin:   &SCOPE_CAPI,
-							Scenario: types.StrPtr("crowdsecurity/test2"),
-							Value:    types.StrPtr("1.2.3.5"),
-							Scope:    types.StrPtr("Ip"),
-							Duration: types.StrPtr("24h"),
-							Type:     types.StrPtr("ban"),
+				modelscapi.GetDecisionsStreamResponse{
+					New: modelscapi.GetDecisionsStreamResponseNew{
+						&modelscapi.GetDecisionsStreamResponseNewItem{
+							Scenario: ptr.Of("crowdsecurity/ssh-bf"),
+							Scope:    ptr.Of("Ip"),
+							Decisions: []*modelscapi.GetDecisionsStreamResponseNewItemDecisionsItems0{
+								{
+									Value:    ptr.Of("1.2.3.5"),
+									Duration: ptr.Of("24h"),
+								},
+							},
 						},
 					},
 				},
 			)))
 			tc.setUp()
+
 			var buf bytes.Buffer
+
 			go func() {
 				logrus.SetOutput(&buf)
-				if err := api.Pull(); err != nil {
+
+				if err := api.Pull(ctx); err != nil {
 					panic(err)
 				}
 			}()
-			//Slightly long because the CI runner for windows are slow, and this can lead to random failure
+
+			// Slightly long because the CI runner for windows are slow, and this can lead to random failure
 			time.Sleep(time.Millisecond * 500)
 			logrus.SetOutput(os.Stderr)
 			assert.Contains(t, buf.String(), tc.logContains)
-			assertTotalDecisionCount(t, api.dbClient, tc.expectedDecisionCount)
+			assertTotalDecisionCount(t, ctx, api.dbClient, tc.expectedDecisionCount)
 		})
 	}
 }
@@ -862,6 +1201,7 @@ func TestShouldShareAlert(t *testing.T) {
 	tests := []struct {
 		name          string
 		consoleConfig *csconfig.ConsoleConfig
+		shareSignals  bool
 		alert         *models.Alert
 		expectedRet   bool
 		expectedTrust string
@@ -869,29 +1209,32 @@ func TestShouldShareAlert(t *testing.T) {
 		{
 			name: "custom alert should be shared if config enables it",
 			consoleConfig: &csconfig.ConsoleConfig{
-				ShareCustomScenarios: types.BoolPtr(true),
+				ShareCustomScenarios: ptr.Of(true),
 			},
-			alert:         &models.Alert{Simulated: types.BoolPtr(false)},
+			alert:         &models.Alert{Simulated: ptr.Of(false)},
+			shareSignals:  true,
 			expectedRet:   true,
 			expectedTrust: "custom",
 		},
 		{
 			name: "custom alert should not be shared if config disables it",
 			consoleConfig: &csconfig.ConsoleConfig{
-				ShareCustomScenarios: types.BoolPtr(false),
+				ShareCustomScenarios: ptr.Of(false),
 			},
-			alert:         &models.Alert{Simulated: types.BoolPtr(false)},
+			alert:         &models.Alert{Simulated: ptr.Of(false)},
+			shareSignals:  true,
 			expectedRet:   false,
 			expectedTrust: "custom",
 		},
 		{
 			name: "manual alert should be shared if config enables it",
 			consoleConfig: &csconfig.ConsoleConfig{
-				ShareManualDecisions: types.BoolPtr(true),
+				ShareManualDecisions: ptr.Of(true),
 			},
+			shareSignals: true,
 			alert: &models.Alert{
-				Simulated: types.BoolPtr(false),
-				Decisions: []*models.Decision{{Origin: types.StrPtr("cscli")}},
+				Simulated: ptr.Of(false),
+				Decisions: []*models.Decision{{Origin: ptr.Of(types.CscliOrigin)}},
 			},
 			expectedRet:   true,
 			expectedTrust: "manual",
@@ -899,11 +1242,12 @@ func TestShouldShareAlert(t *testing.T) {
 		{
 			name: "manual alert should not be shared if config disables it",
 			consoleConfig: &csconfig.ConsoleConfig{
-				ShareManualDecisions: types.BoolPtr(false),
+				ShareManualDecisions: ptr.Of(false),
 			},
+			shareSignals: true,
 			alert: &models.Alert{
-				Simulated: types.BoolPtr(false),
-				Decisions: []*models.Decision{{Origin: types.StrPtr("cscli")}},
+				Simulated: ptr.Of(false),
+				Decisions: []*models.Decision{{Origin: ptr.Of(types.CscliOrigin)}},
 			},
 			expectedRet:   false,
 			expectedTrust: "manual",
@@ -911,11 +1255,12 @@ func TestShouldShareAlert(t *testing.T) {
 		{
 			name: "manual alert should be shared if config enables it",
 			consoleConfig: &csconfig.ConsoleConfig{
-				ShareTaintedScenarios: types.BoolPtr(true),
+				ShareTaintedScenarios: ptr.Of(true),
 			},
+			shareSignals: true,
 			alert: &models.Alert{
-				Simulated:    types.BoolPtr(false),
-				ScenarioHash: types.StrPtr("whateverHash"),
+				Simulated:    ptr.Of(false),
+				ScenarioHash: ptr.Of("whateverHash"),
 			},
 			expectedRet:   true,
 			expectedTrust: "tainted",
@@ -923,21 +1268,34 @@ func TestShouldShareAlert(t *testing.T) {
 		{
 			name: "manual alert should not be shared if config disables it",
 			consoleConfig: &csconfig.ConsoleConfig{
-				ShareTaintedScenarios: types.BoolPtr(false),
+				ShareTaintedScenarios: ptr.Of(false),
 			},
+			shareSignals: true,
 			alert: &models.Alert{
-				Simulated:    types.BoolPtr(false),
-				ScenarioHash: types.StrPtr("whateverHash"),
+				Simulated:    ptr.Of(false),
+				ScenarioHash: ptr.Of("whateverHash"),
 			},
 			expectedRet:   false,
 			expectedTrust: "tainted",
 		},
+		{
+			name: "manual alert should not be shared if global sharing is disabled",
+			consoleConfig: &csconfig.ConsoleConfig{
+				ShareManualDecisions: ptr.Of(true),
+			},
+			shareSignals: false,
+			alert: &models.Alert{
+				Simulated:    ptr.Of(false),
+				ScenarioHash: ptr.Of("whateverHash"),
+			},
+			expectedRet:   false,
+			expectedTrust: "manual",
+		},
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			ret := shouldShareAlert(tc.alert, tc.consoleConfig)
+			ret := shouldShareAlert(tc.alert, tc.consoleConfig, tc.shareSignals)
 			assert.Equal(t, tc.expectedRet, ret)
 		})
 	}
