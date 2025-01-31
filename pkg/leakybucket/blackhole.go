@@ -21,7 +21,6 @@ type Blackhole struct {
 func NewBlackhole(bucketFactory *BucketFactory) (*Blackhole, error) {
 	duration, err := time.ParseDuration(bucketFactory.Blackhole)
 	if err != nil {
-		bucketFactory.logger.Warning("Blackhole duration not valid, using 1h")
 		return nil, fmt.Errorf("blackhole duration not valid '%s'", bucketFactory.Blackhole)
 	}
 	return &Blackhole{
@@ -31,9 +30,9 @@ func NewBlackhole(bucketFactory *BucketFactory) (*Blackhole, error) {
 	}, nil
 }
 
-func (bl *Blackhole) OnBucketOverflow(bucketFactory *BucketFactory) func(*Leaky, types.RuntimeAlert, *Queue) (types.RuntimeAlert, *Queue) {
-	return func(leaky *Leaky, alert types.RuntimeAlert, queue *Queue) (types.RuntimeAlert, *Queue) {
-		var blackholed bool = false
+func (bl *Blackhole) OnBucketOverflow(bucketFactory *BucketFactory) func(*Leaky, types.RuntimeAlert, *types.Queue) (types.RuntimeAlert, *types.Queue) {
+	return func(leaky *Leaky, alert types.RuntimeAlert, queue *types.Queue) (types.RuntimeAlert, *types.Queue) {
+		var blackholed = false
 		var tmp []HiddenKey
 		// search if we are blackholed and refresh the slice
 		for _, element := range bl.hiddenKeys {
@@ -49,7 +48,6 @@ func (bl *Blackhole) OnBucketOverflow(bucketFactory *BucketFactory) func(*Leaky,
 				tmp = append(tmp, element)
 			} else {
 				leaky.logger.Debugf("%s left blackhole %s ago", element.key, leaky.Ovflw_ts.Sub(element.expiration))
-
 			}
 		}
 		bl.hiddenKeys = tmp
@@ -64,5 +62,4 @@ func (bl *Blackhole) OnBucketOverflow(bucketFactory *BucketFactory) func(*Leaky,
 		leaky.logger.Debugf("Adding overflow to blackhole (%s)", leaky.First_ts)
 		return alert, queue
 	}
-
 }

@@ -177,6 +177,34 @@ func (dc *DecisionCreate) SetNillableSimulated(b *bool) *DecisionCreate {
 	return dc
 }
 
+// SetUUID sets the "uuid" field.
+func (dc *DecisionCreate) SetUUID(s string) *DecisionCreate {
+	dc.mutation.SetUUID(s)
+	return dc
+}
+
+// SetNillableUUID sets the "uuid" field if the given value is not nil.
+func (dc *DecisionCreate) SetNillableUUID(s *string) *DecisionCreate {
+	if s != nil {
+		dc.SetUUID(*s)
+	}
+	return dc
+}
+
+// SetAlertDecisions sets the "alert_decisions" field.
+func (dc *DecisionCreate) SetAlertDecisions(i int) *DecisionCreate {
+	dc.mutation.SetAlertDecisions(i)
+	return dc
+}
+
+// SetNillableAlertDecisions sets the "alert_decisions" field if the given value is not nil.
+func (dc *DecisionCreate) SetNillableAlertDecisions(i *int) *DecisionCreate {
+	if i != nil {
+		dc.SetAlertDecisions(*i)
+	}
+	return dc
+}
+
 // SetOwnerID sets the "owner" edge to the Alert entity by ID.
 func (dc *DecisionCreate) SetOwnerID(id int) *DecisionCreate {
 	dc.mutation.SetOwnerID(id)
@@ -203,50 +231,8 @@ func (dc *DecisionCreate) Mutation() *DecisionMutation {
 
 // Save creates the Decision in the database.
 func (dc *DecisionCreate) Save(ctx context.Context) (*Decision, error) {
-	var (
-		err  error
-		node *Decision
-	)
 	dc.defaults()
-	if len(dc.hooks) == 0 {
-		if err = dc.check(); err != nil {
-			return nil, err
-		}
-		node, err = dc.sqlSave(ctx)
-	} else {
-		var mut Mutator = MutateFunc(func(ctx context.Context, m Mutation) (Value, error) {
-			mutation, ok := m.(*DecisionMutation)
-			if !ok {
-				return nil, fmt.Errorf("unexpected mutation type %T", m)
-			}
-			if err = dc.check(); err != nil {
-				return nil, err
-			}
-			dc.mutation = mutation
-			if node, err = dc.sqlSave(ctx); err != nil {
-				return nil, err
-			}
-			mutation.id = &node.ID
-			mutation.done = true
-			return node, err
-		})
-		for i := len(dc.hooks) - 1; i >= 0; i-- {
-			if dc.hooks[i] == nil {
-				return nil, fmt.Errorf("ent: uninitialized hook (forgotten import ent/runtime?)")
-			}
-			mut = dc.hooks[i](mut)
-		}
-		v, err := mut.Mutate(ctx, dc.mutation)
-		if err != nil {
-			return nil, err
-		}
-		nv, ok := v.(*Decision)
-		if !ok {
-			return nil, fmt.Errorf("unexpected node type %T returned from DecisionMutation", v)
-		}
-		node = nv
-	}
-	return node, err
+	return withHooks(ctx, dc.sqlSave, dc.mutation, dc.hooks)
 }
 
 // SaveX calls Save and panics if Save returns an error.
@@ -289,6 +275,12 @@ func (dc *DecisionCreate) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (dc *DecisionCreate) check() error {
+	if _, ok := dc.mutation.CreatedAt(); !ok {
+		return &ValidationError{Name: "created_at", err: errors.New(`ent: missing required field "Decision.created_at"`)}
+	}
+	if _, ok := dc.mutation.UpdatedAt(); !ok {
+		return &ValidationError{Name: "updated_at", err: errors.New(`ent: missing required field "Decision.updated_at"`)}
+	}
 	if _, ok := dc.mutation.Scenario(); !ok {
 		return &ValidationError{Name: "scenario", err: errors.New(`ent: missing required field "Decision.scenario"`)}
 	}
@@ -311,6 +303,9 @@ func (dc *DecisionCreate) check() error {
 }
 
 func (dc *DecisionCreate) sqlSave(ctx context.Context) (*Decision, error) {
+	if err := dc.check(); err != nil {
+		return nil, err
+	}
 	_node, _spec := dc.createSpec()
 	if err := sqlgraph.CreateNode(ctx, dc.driver, _spec); err != nil {
 		if sqlgraph.IsConstraintError(err) {
@@ -320,131 +315,75 @@ func (dc *DecisionCreate) sqlSave(ctx context.Context) (*Decision, error) {
 	}
 	id := _spec.ID.Value.(int64)
 	_node.ID = int(id)
+	dc.mutation.id = &_node.ID
+	dc.mutation.done = true
 	return _node, nil
 }
 
 func (dc *DecisionCreate) createSpec() (*Decision, *sqlgraph.CreateSpec) {
 	var (
 		_node = &Decision{config: dc.config}
-		_spec = &sqlgraph.CreateSpec{
-			Table: decision.Table,
-			ID: &sqlgraph.FieldSpec{
-				Type:   field.TypeInt,
-				Column: decision.FieldID,
-			},
-		}
+		_spec = sqlgraph.NewCreateSpec(decision.Table, sqlgraph.NewFieldSpec(decision.FieldID, field.TypeInt))
 	)
 	if value, ok := dc.mutation.CreatedAt(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeTime,
-			Value:  value,
-			Column: decision.FieldCreatedAt,
-		})
-		_node.CreatedAt = &value
+		_spec.SetField(decision.FieldCreatedAt, field.TypeTime, value)
+		_node.CreatedAt = value
 	}
 	if value, ok := dc.mutation.UpdatedAt(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeTime,
-			Value:  value,
-			Column: decision.FieldUpdatedAt,
-		})
-		_node.UpdatedAt = &value
+		_spec.SetField(decision.FieldUpdatedAt, field.TypeTime, value)
+		_node.UpdatedAt = value
 	}
 	if value, ok := dc.mutation.Until(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeTime,
-			Value:  value,
-			Column: decision.FieldUntil,
-		})
+		_spec.SetField(decision.FieldUntil, field.TypeTime, value)
 		_node.Until = &value
 	}
 	if value, ok := dc.mutation.Scenario(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeString,
-			Value:  value,
-			Column: decision.FieldScenario,
-		})
+		_spec.SetField(decision.FieldScenario, field.TypeString, value)
 		_node.Scenario = value
 	}
 	if value, ok := dc.mutation.GetType(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeString,
-			Value:  value,
-			Column: decision.FieldType,
-		})
+		_spec.SetField(decision.FieldType, field.TypeString, value)
 		_node.Type = value
 	}
 	if value, ok := dc.mutation.StartIP(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeInt64,
-			Value:  value,
-			Column: decision.FieldStartIP,
-		})
+		_spec.SetField(decision.FieldStartIP, field.TypeInt64, value)
 		_node.StartIP = value
 	}
 	if value, ok := dc.mutation.EndIP(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeInt64,
-			Value:  value,
-			Column: decision.FieldEndIP,
-		})
+		_spec.SetField(decision.FieldEndIP, field.TypeInt64, value)
 		_node.EndIP = value
 	}
 	if value, ok := dc.mutation.StartSuffix(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeInt64,
-			Value:  value,
-			Column: decision.FieldStartSuffix,
-		})
+		_spec.SetField(decision.FieldStartSuffix, field.TypeInt64, value)
 		_node.StartSuffix = value
 	}
 	if value, ok := dc.mutation.EndSuffix(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeInt64,
-			Value:  value,
-			Column: decision.FieldEndSuffix,
-		})
+		_spec.SetField(decision.FieldEndSuffix, field.TypeInt64, value)
 		_node.EndSuffix = value
 	}
 	if value, ok := dc.mutation.IPSize(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeInt64,
-			Value:  value,
-			Column: decision.FieldIPSize,
-		})
+		_spec.SetField(decision.FieldIPSize, field.TypeInt64, value)
 		_node.IPSize = value
 	}
 	if value, ok := dc.mutation.Scope(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeString,
-			Value:  value,
-			Column: decision.FieldScope,
-		})
+		_spec.SetField(decision.FieldScope, field.TypeString, value)
 		_node.Scope = value
 	}
 	if value, ok := dc.mutation.Value(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeString,
-			Value:  value,
-			Column: decision.FieldValue,
-		})
+		_spec.SetField(decision.FieldValue, field.TypeString, value)
 		_node.Value = value
 	}
 	if value, ok := dc.mutation.Origin(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeString,
-			Value:  value,
-			Column: decision.FieldOrigin,
-		})
+		_spec.SetField(decision.FieldOrigin, field.TypeString, value)
 		_node.Origin = value
 	}
 	if value, ok := dc.mutation.Simulated(); ok {
-		_spec.Fields = append(_spec.Fields, &sqlgraph.FieldSpec{
-			Type:   field.TypeBool,
-			Value:  value,
-			Column: decision.FieldSimulated,
-		})
+		_spec.SetField(decision.FieldSimulated, field.TypeBool, value)
 		_node.Simulated = value
+	}
+	if value, ok := dc.mutation.UUID(); ok {
+		_spec.SetField(decision.FieldUUID, field.TypeString, value)
+		_node.UUID = value
 	}
 	if nodes := dc.mutation.OwnerIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -454,16 +393,13 @@ func (dc *DecisionCreate) createSpec() (*Decision, *sqlgraph.CreateSpec) {
 			Columns: []string{decision.OwnerColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
-				IDSpec: &sqlgraph.FieldSpec{
-					Type:   field.TypeInt,
-					Column: alert.FieldID,
-				},
+				IDSpec: sqlgraph.NewFieldSpec(alert.FieldID, field.TypeInt),
 			},
 		}
 		for _, k := range nodes {
 			edge.Target.Nodes = append(edge.Target.Nodes, k)
 		}
-		_node.alert_decisions = &nodes[0]
+		_node.AlertDecisions = nodes[0]
 		_spec.Edges = append(_spec.Edges, edge)
 	}
 	return _node, _spec
@@ -472,11 +408,15 @@ func (dc *DecisionCreate) createSpec() (*Decision, *sqlgraph.CreateSpec) {
 // DecisionCreateBulk is the builder for creating many Decision entities in bulk.
 type DecisionCreateBulk struct {
 	config
+	err      error
 	builders []*DecisionCreate
 }
 
 // Save creates the Decision entities in the database.
 func (dcb *DecisionCreateBulk) Save(ctx context.Context) ([]*Decision, error) {
+	if dcb.err != nil {
+		return nil, dcb.err
+	}
 	specs := make([]*sqlgraph.CreateSpec, len(dcb.builders))
 	nodes := make([]*Decision, len(dcb.builders))
 	mutators := make([]Mutator, len(dcb.builders))
@@ -493,8 +433,8 @@ func (dcb *DecisionCreateBulk) Save(ctx context.Context) ([]*Decision, error) {
 					return nil, err
 				}
 				builder.mutation = mutation
-				nodes[i], specs[i] = builder.createSpec()
 				var err error
+				nodes[i], specs[i] = builder.createSpec()
 				if i < len(mutators)-1 {
 					_, err = mutators[i+1].Mutate(root, dcb.builders[i+1].mutation)
 				} else {

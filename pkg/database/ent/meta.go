@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/crowdsecurity/crowdsec/pkg/database/ent/alert"
 	"github.com/crowdsecurity/crowdsec/pkg/database/ent/meta"
@@ -18,17 +19,19 @@ type Meta struct {
 	// ID of the ent.
 	ID int `json:"id,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
-	CreatedAt *time.Time `json:"created_at,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
 	// UpdatedAt holds the value of the "updated_at" field.
-	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 	// Key holds the value of the "key" field.
 	Key string `json:"key,omitempty"`
 	// Value holds the value of the "value" field.
 	Value string `json:"value,omitempty"`
+	// AlertMetas holds the value of the "alert_metas" field.
+	AlertMetas int `json:"alert_metas,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the MetaQuery when eager-loading is set.
-	Edges       MetaEdges `json:"edges"`
-	alert_metas *int
+	Edges        MetaEdges `json:"edges"`
+	selectValues sql.SelectValues
 }
 
 // MetaEdges holds the relations/edges for other nodes in the graph.
@@ -43,12 +46,10 @@ type MetaEdges struct {
 // OwnerOrErr returns the Owner value or an error if the edge
 // was not loaded in eager-loading, or loaded but was not found.
 func (e MetaEdges) OwnerOrErr() (*Alert, error) {
-	if e.loadedTypes[0] {
-		if e.Owner == nil {
-			// Edge was loaded but was not found.
-			return nil, &NotFoundError{label: alert.Label}
-		}
+	if e.Owner != nil {
 		return e.Owner, nil
+	} else if e.loadedTypes[0] {
+		return nil, &NotFoundError{label: alert.Label}
 	}
 	return nil, &NotLoadedError{edge: "owner"}
 }
@@ -58,16 +59,14 @@ func (*Meta) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case meta.FieldID:
+		case meta.FieldID, meta.FieldAlertMetas:
 			values[i] = new(sql.NullInt64)
 		case meta.FieldKey, meta.FieldValue:
 			values[i] = new(sql.NullString)
 		case meta.FieldCreatedAt, meta.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
-		case meta.ForeignKeys[0]: // alert_metas
-			values[i] = new(sql.NullInt64)
 		default:
-			return nil, fmt.Errorf("unexpected column %q for type Meta", columns[i])
+			values[i] = new(sql.UnknownType)
 		}
 	}
 	return values, nil
@@ -91,15 +90,13 @@ func (m *Meta) assignValues(columns []string, values []any) error {
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created_at", values[i])
 			} else if value.Valid {
-				m.CreatedAt = new(time.Time)
-				*m.CreatedAt = value.Time
+				m.CreatedAt = value.Time
 			}
 		case meta.FieldUpdatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field updated_at", values[i])
 			} else if value.Valid {
-				m.UpdatedAt = new(time.Time)
-				*m.UpdatedAt = value.Time
+				m.UpdatedAt = value.Time
 			}
 		case meta.FieldKey:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -113,28 +110,35 @@ func (m *Meta) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				m.Value = value.String
 			}
-		case meta.ForeignKeys[0]:
+		case meta.FieldAlertMetas:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
-				return fmt.Errorf("unexpected type %T for edge-field alert_metas", value)
+				return fmt.Errorf("unexpected type %T for field alert_metas", values[i])
 			} else if value.Valid {
-				m.alert_metas = new(int)
-				*m.alert_metas = int(value.Int64)
+				m.AlertMetas = int(value.Int64)
 			}
+		default:
+			m.selectValues.Set(columns[i], values[i])
 		}
 	}
 	return nil
 }
 
+// GetValue returns the ent.Value that was dynamically selected and assigned to the Meta.
+// This includes values selected through modifiers, order, etc.
+func (m *Meta) GetValue(name string) (ent.Value, error) {
+	return m.selectValues.Get(name)
+}
+
 // QueryOwner queries the "owner" edge of the Meta entity.
 func (m *Meta) QueryOwner() *AlertQuery {
-	return (&MetaClient{config: m.config}).QueryOwner(m)
+	return NewMetaClient(m.config).QueryOwner(m)
 }
 
 // Update returns a builder for updating this Meta.
 // Note that you need to call Meta.Unwrap() before calling this method if this Meta
 // was returned from a transaction, and the transaction was committed or rolled back.
 func (m *Meta) Update() *MetaUpdateOne {
-	return (&MetaClient{config: m.config}).UpdateOne(m)
+	return NewMetaClient(m.config).UpdateOne(m)
 }
 
 // Unwrap unwraps the Meta entity that was returned from a transaction after it was closed,
@@ -153,30 +157,23 @@ func (m *Meta) String() string {
 	var builder strings.Builder
 	builder.WriteString("Meta(")
 	builder.WriteString(fmt.Sprintf("id=%v, ", m.ID))
-	if v := m.CreatedAt; v != nil {
-		builder.WriteString("created_at=")
-		builder.WriteString(v.Format(time.ANSIC))
-	}
+	builder.WriteString("created_at=")
+	builder.WriteString(m.CreatedAt.Format(time.ANSIC))
 	builder.WriteString(", ")
-	if v := m.UpdatedAt; v != nil {
-		builder.WriteString("updated_at=")
-		builder.WriteString(v.Format(time.ANSIC))
-	}
+	builder.WriteString("updated_at=")
+	builder.WriteString(m.UpdatedAt.Format(time.ANSIC))
 	builder.WriteString(", ")
 	builder.WriteString("key=")
 	builder.WriteString(m.Key)
 	builder.WriteString(", ")
 	builder.WriteString("value=")
 	builder.WriteString(m.Value)
+	builder.WriteString(", ")
+	builder.WriteString("alert_metas=")
+	builder.WriteString(fmt.Sprintf("%v", m.AlertMetas))
 	builder.WriteByte(')')
 	return builder.String()
 }
 
 // MetaSlice is a parsable slice of Meta.
 type MetaSlice []*Meta
-
-func (m MetaSlice) config(cfg config) {
-	for _i := range m {
-		m[_i].config = cfg
-	}
-}

@@ -1,7 +1,0 @@
-#!/bin/sh
-unset IFS
-set -euf
-
-# coreutils -> for timeout (busybox is not enough)
-sudo apk add python3 go tar procps netcat-openbsd coreutils
-

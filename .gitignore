@@ -6,41 +6,60 @@
 *.dylib
 *~
 .pc
+
+# IDEs
 .vscode
+.idea
+
+# If vendor is included, allow prebuilt (wasm?) libraries.
+!vendor/**/*.so
 
 # Test binaries, built with `go test -c`
 *.test
 *.cover
 
-# Output of the go coverage tool, specifically when used with LiteIDE
+# Test dependencies
+test/tools/*
+
+# Saved test status
+test/bats/.bats/run-logs
+
+# VMs used for dev/test
+
+.vagrant
+
+# Test binaries, built from *_test.go
+pkg/csplugin/tests/cs_plugin_test*
+
+# Output of go-acc, go -cover
 *.out
+test/coverage/*
 
 # Development artifacts, backups, etc
 *.swp
 *.swo
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# Dependencies are not vendored by default, but a tarball is created by "make vendor"
+# and provided in the release. Used by gentoo, etc.
+vendor/
+vendor.tgz
 
 # crowdsec binaries
 cmd/crowdsec-cli/cscli
 cmd/crowdsec/crowdsec
-plugins/notifications/http/notification-http
-plugins/notifications/slack/notification-slack
-plugins/notifications/splunk/notification-splunk
-plugins/notifications/email/notification-email
-plugins/notifications/dummy/notification-dummy
+cmd/notification-*/notification-*
 
-#test binaries
-pkg/csplugin/tests/cs_plugin_test*
-
-#test cache (downloaded files)
+# Test cache (downloaded files)
 .cache
 
-#release stuff
+# Release stuff
 crowdsec-v*
-pkg/cwhub/hubdir/.index.json
 msi
 *.msi
 **/*.nupkg
 *.tgz
+
+# Python
+__pycache__
+*.py[cod]
+*.egg-info
