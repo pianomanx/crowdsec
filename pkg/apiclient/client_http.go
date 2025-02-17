@@ -19,6 +19,7 @@ func (c *ApiClient) NewRequest(method, url string, body interface{}) (*http.Requ
 	if !strings.HasSuffix(c.BaseURL.Path, "/") {
 		return nil, fmt.Errorf("BaseURL must have a trailing slash, but %q does not", c.BaseURL)
 	}
+
 	u, err := c.BaseURL.Parse(url)
 	if err != nil {
 		return nil, err
@@ -29,8 +30,8 @@ func (c *ApiClient) NewRequest(method, url string, body interface{}) (*http.Requ
 		buf = &bytes.Buffer{}
 		enc := json.NewEncoder(buf)
 		enc.SetEscapeHTML(false)
-		err := enc.Encode(body)
-		if err != nil {
+
+		if err = enc.Encode(body); err != nil {
 			return nil, err
 		}
 	}
@@ -51,6 +52,7 @@ func (c *ApiClient) Do(ctx context.Context, req *http.Request, v interface{}) (*
 	if ctx == nil {
 		return nil, errors.New("context must be non-nil")
 	}
+
 	req = req.WithContext(ctx)
 
 	// Check rate limit
@@ -58,6 +60,8 @@ func (c *ApiClient) Do(ctx context.Context, req *http.Request, v interface{}) (*
 	if c.UserAgent != "" {
 		req.Header.Add("User-Agent", c.UserAgent)
 	}
+
+	log.Debugf("[URL] %s %s", req.Method, req.URL)
 
 	resp, err := c.client.Do(req)
 	if resp != nil && resp.Body != nil {
@@ -74,19 +78,22 @@ func (c *ApiClient) Do(ctx context.Context, req *http.Request, v interface{}) (*
 		}
 
 		// If the error type is *url.Error, sanitize its URL before returning.
-		if e, ok := err.(*url.Error); ok {
-			if url, err := url.Parse(e.URL); err == nil {
-				e.URL = url.String()
-				return newResponse(resp), e
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			if parsedURL, parseErr := url.Parse(urlErr.URL); parseErr == nil {
+				urlErr.URL = parsedURL.String()
+				return newResponse(resp), urlErr
 			}
+
 			return newResponse(resp), err
 		}
+
 		return newResponse(resp), err
 	}
 
 	if log.GetLevel() >= log.DebugLevel {
 		for k, v := range resp.Header {
-			log.Debugf("[headers] %s : %s", k, v)
+			log.Debugf("[headers] %s: %s", k, v)
 		}
 
 		dump, err := httputil.DumpResponse(resp, true)
@@ -109,9 +116,12 @@ func (c *ApiClient) Do(ctx context.Context, req *http.Request, v interface{}) (*
 			if errors.Is(decErr, io.EOF) {
 				decErr = nil // ignore EOF errors caused by empty response body
 			}
+
 			return response, decErr
 		}
+
 		io.Copy(w, resp.Body)
 	}
+
 	return response, err
 }

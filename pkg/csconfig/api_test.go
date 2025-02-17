@@ -1,31 +1,33 @@
 package csconfig
 
 import (
-	"fmt"
+	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/crowdsecurity/crowdsec/pkg/types"
+	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
-	"gopkg.in/yaml.v2"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
+
+	"github.com/crowdsecurity/go-cs-lib/cstest"
+	"github.com/crowdsecurity/go-cs-lib/ptr"
 )
 
 func TestLoadLocalApiClientCfg(t *testing.T) {
-	True := true
 	tests := []struct {
-		name           string
-		Input          *LocalApiClientCfg
-		expectedResult *ApiCredentialsCfg
-		err            string
+		name        string
+		input       *LocalApiClientCfg
+		expected    *ApiCredentialsCfg
+		expectedErr string
 	}{
 		{
 			name: "basic valid configuration",
-			Input: &LocalApiClientCfg{
-				CredentialsFilePath: "./tests/lapi-secrets.yaml",
+			input: &LocalApiClientCfg{
+				CredentialsFilePath: "./testdata/lapi-secrets.yaml",
 			},
-			expectedResult: &ApiCredentialsCfg{
+			expected: &ApiCredentialsCfg{
 				URL:      "http://localhost:8080/",
 				Login:    "test",
 				Password: "testpassword",
@@ -33,25 +35,27 @@ func TestLoadLocalApiClientCfg(t *testing.T) {
 		},
 		{
 			name: "invalid configuration",
-			Input: &LocalApiClientCfg{
-				CredentialsFilePath: "./tests/bad_lapi-secrets.yaml",
+			input: &LocalApiClientCfg{
+				CredentialsFilePath: "./testdata/bad_lapi-secrets.yaml",
 			},
-			expectedResult: &ApiCredentialsCfg{},
+			expected:    &ApiCredentialsCfg{},
+			expectedErr: "field unknown_key not found in type csconfig.ApiCredentialsCfg",
 		},
 		{
 			name: "invalid configuration filepath",
-			Input: &LocalApiClientCfg{
-				CredentialsFilePath: "./tests/nonexist_lapi-secrets.yaml",
+			input: &LocalApiClientCfg{
+				CredentialsFilePath: "./testdata/nonexist_lapi-secrets.yaml",
 			},
-			expectedResult: nil,
+			expected:    nil,
+			expectedErr: "open ./testdata/nonexist_lapi-secrets.yaml: " + cstest.FileNotFoundMessage,
 		},
 		{
 			name: "valid configuration with insecure skip verify",
-			Input: &LocalApiClientCfg{
-				CredentialsFilePath: "./tests/lapi-secrets.yaml",
-				InsecureSkipVerify:  &True,
+			input: &LocalApiClientCfg{
+				CredentialsFilePath: "./testdata/lapi-secrets.yaml",
+				InsecureSkipVerify:  ptr.Of(false),
 			},
-			expectedResult: &ApiCredentialsCfg{
+			expected: &ApiCredentialsCfg{
 				URL:      "http://localhost:8080/",
 				Login:    "test",
 				Password: "testpassword",
@@ -59,40 +63,33 @@ func TestLoadLocalApiClientCfg(t *testing.T) {
 		},
 	}
 
-	for idx, test := range tests {
-		fmt.Printf("TEST '%s'\n", test.name)
-		err := test.Input.Load()
-		if err == nil && test.err != "" {
-			t.Fatalf("%d/%d expected error, didn't get it", idx, len(tests))
-		} else if test.err != "" {
-			if !strings.HasPrefix(fmt.Sprintf("%s", err), test.err) {
-				t.Fatalf("%d/%d expected '%s' got '%s'", idx, len(tests),
-					test.err,
-					fmt.Sprintf("%s", err))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.input.Load()
+			cstest.RequireErrorContains(t, err, tc.expectedErr)
+
+			if tc.expectedErr != "" {
+				return
 			}
-		}
 
-		isOk := assert.Equal(t, test.expectedResult, test.Input.Credentials)
-		if !isOk {
-			t.Fatalf("test '%s' failed", test.name)
-		}
-
+			assert.Equal(t, tc.expected, tc.input.Credentials)
+		})
 	}
 }
 
 func TestLoadOnlineApiClientCfg(t *testing.T) {
 	tests := []struct {
-		name           string
-		Input          *OnlineApiClientCfg
-		expectedResult *ApiCredentialsCfg
-		err            string
+		name        string
+		input       *OnlineApiClientCfg
+		expected    *ApiCredentialsCfg
+		expectedErr string
 	}{
 		{
 			name: "basic valid configuration",
-			Input: &OnlineApiClientCfg{
-				CredentialsFilePath: "./tests/online-api-secrets.yaml",
+			input: &OnlineApiClientCfg{
+				CredentialsFilePath: "./testdata/online-api-secrets.yaml",
 			},
-			expectedResult: &ApiCredentialsCfg{
+			expected: &ApiCredentialsCfg{
 				URL:      "http://crowdsec.api",
 				Login:    "test",
 				Password: "testpassword",
@@ -100,178 +97,235 @@ func TestLoadOnlineApiClientCfg(t *testing.T) {
 		},
 		{
 			name: "invalid configuration",
-			Input: &OnlineApiClientCfg{
-				CredentialsFilePath: "./tests/bad_lapi-secrets.yaml",
+			input: &OnlineApiClientCfg{
+				CredentialsFilePath: "./testdata/bad_lapi-secrets.yaml",
 			},
-			expectedResult: &ApiCredentialsCfg{},
-			err:            "failed unmarshaling api server credentials",
+			expected:    &ApiCredentialsCfg{},
+			expectedErr: "failed to parse api server credentials",
 		},
 		{
 			name: "missing field configuration",
-			Input: &OnlineApiClientCfg{
-				CredentialsFilePath: "./tests/bad_online-api-secrets.yaml",
+			input: &OnlineApiClientCfg{
+				CredentialsFilePath: "./testdata/bad_online-api-secrets.yaml",
 			},
-			expectedResult: nil,
+			expected: nil,
 		},
 		{
 			name: "invalid configuration filepath",
-			Input: &OnlineApiClientCfg{
-				CredentialsFilePath: "./tests/nonexist_online-api-secrets.yaml",
+			input: &OnlineApiClientCfg{
+				CredentialsFilePath: "./testdata/nonexist_online-api-secrets.yaml",
 			},
-			expectedResult: &ApiCredentialsCfg{},
-			err:            "failed to read api server credentials",
+			expected:    &ApiCredentialsCfg{},
+			expectedErr: "open ./testdata/nonexist_online-api-secrets.yaml: " + cstest.FileNotFoundMessage,
 		},
 	}
 
-	for idx, test := range tests {
-		err := test.Input.Load()
-		if err == nil && test.err != "" {
-			fmt.Printf("TEST '%s': NOK\n", test.name)
-			t.Fatalf("%d/%d expected error, didn't get it", idx, len(tests))
-		} else if test.err != "" {
-			if !strings.HasPrefix(fmt.Sprintf("%s", err), test.err) {
-				fmt.Printf("TEST '%s': NOK\n", test.name)
-				t.Fatalf("%d/%d expected '%s' got '%s'", idx, len(tests),
-					test.err,
-					fmt.Sprintf("%s", err))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.input.Load()
+			cstest.RequireErrorContains(t, err, tc.expectedErr)
+
+			if tc.expectedErr != "" {
+				return
 			}
-		}
 
-		isOk := assert.Equal(t, test.expectedResult, test.Input.Credentials)
-		if !isOk {
-			t.Fatalf("TEST '%s': NOK", test.name)
-		} else {
-			fmt.Printf("TEST '%s': OK\n", test.name)
-		}
-
+			assert.Equal(t, tc.expected, tc.input.Credentials)
+		})
 	}
 }
 
 func TestLoadAPIServer(t *testing.T) {
 	tmpLAPI := &LocalApiServerCfg{
-		ProfilesPath: "./tests/profiles.yaml",
+		ProfilesPath: "./testdata/profiles.yaml",
 	}
-	if err := tmpLAPI.LoadProfiles(); err != nil {
-		t.Fatalf("loading tmp profiles: %+v", err)
-	}
+	err := tmpLAPI.LoadProfiles()
+	require.NoError(t, err)
 
-	LogDirFullPath, err := filepath.Abs("./tests")
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	logLevel := log.InfoLevel
 	config := &Config{}
-	fcontent, err := os.ReadFile("./tests/config.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
+	fcontent, err := os.ReadFile("./testdata/config.yaml")
+	require.NoError(t, err)
+
 	configData := os.ExpandEnv(string(fcontent))
-	err = yaml.UnmarshalStrict([]byte(configData), &config)
-	if err != nil {
-		t.Fatal(err)
-	}
+
+	dec := yaml.NewDecoder(strings.NewReader(configData))
+	dec.KnownFields(true)
+
+	err = dec.Decode(&config)
+	require.NoError(t, err)
+
 	tests := []struct {
-		name           string
-		Input          *Config
-		expectedResult *LocalApiServerCfg
-		err            string
+		name        string
+		input       *Config
+		expected    *LocalApiServerCfg
+		expectedErr string
 	}{
 		{
 			name: "basic valid configuration",
-			Input: &Config{
+			input: &Config{
 				Self: []byte(configData),
 				API: &APICfg{
 					Server: &LocalApiServerCfg{
 						ListenURI: "http://crowdsec.api",
 						OnlineClient: &OnlineApiClientCfg{
-							CredentialsFilePath: "./tests/online-api-secrets.yaml",
+							CredentialsFilePath: "./testdata/online-api-secrets.yaml",
 						},
-						ProfilesPath: "./tests/profiles.yaml",
+						ProfilesPath: "./testdata/profiles.yaml",
+						PapiLogLevel: &logLevel,
 					},
 				},
 				DbConfig: &DatabaseCfg{
 					Type:   "sqlite",
-					DbPath: "./tests/test.db",
+					DbPath: "./testdata/test.db",
 				},
 				Common: &CommonCfg{
-					LogDir:   "./tests/",
+					LogDir:   "./testdata",
 					LogMedia: "stdout",
 				},
 				DisableAPI: false,
 			},
-			expectedResult: &LocalApiServerCfg{
-				Enable:    types.BoolPtr(true),
+			expected: &LocalApiServerCfg{
+				Enable:    ptr.Of(true),
 				ListenURI: "http://crowdsec.api",
 				TLS:       nil,
 				DbConfig: &DatabaseCfg{
-					DbPath:       "./tests/test.db",
-					Type:         "sqlite",
-					MaxOpenConns: types.IntPtr(DEFAULT_MAX_OPEN_CONNS),
+					DbPath:           "./testdata/test.db",
+					Type:             "sqlite",
+					MaxOpenConns:     DEFAULT_MAX_OPEN_CONNS,
+					UseWal:           ptr.Of(true), // autodetected
+					DecisionBulkSize: defaultDecisionBulkSize,
 				},
 				ConsoleConfigPath: DefaultConfigPath("console.yaml"),
 				ConsoleConfig: &ConsoleConfig{
-					ShareManualDecisions:  types.BoolPtr(false),
-					ShareTaintedScenarios: types.BoolPtr(true),
-					ShareCustomScenarios:  types.BoolPtr(true),
+					ShareManualDecisions:  ptr.Of(false),
+					ShareTaintedScenarios: ptr.Of(true),
+					ShareCustomScenarios:  ptr.Of(true),
+					ShareContext:          ptr.Of(false),
+					ConsoleManagement:     ptr.Of(false),
 				},
-				LogDir:   LogDirFullPath,
+				LogDir:   "./testdata",
 				LogMedia: "stdout",
 				OnlineClient: &OnlineApiClientCfg{
-					CredentialsFilePath: "./tests/online-api-secrets.yaml",
+					CredentialsFilePath: "./testdata/online-api-secrets.yaml",
 					Credentials: &ApiCredentialsCfg{
 						URL:      "http://crowdsec.api",
 						Login:    "test",
 						Password: "testpassword",
 					},
+					Sharing: ptr.Of(true),
+					PullConfig: CapiPullConfig{
+						Community:  ptr.Of(true),
+						Blocklists: ptr.Of(true),
+					},
 				},
 				Profiles:               tmpLAPI.Profiles,
-				ProfilesPath:           "./tests/profiles.yaml",
+				ProfilesPath:           "./testdata/profiles.yaml",
 				UseForwardedForHeaders: false,
+				PapiLogLevel:           &logLevel,
+				AutoRegister: &LocalAPIAutoRegisterCfg{
+					Enable:              ptr.Of(false),
+					Token:               "",
+					AllowedRanges:       nil,
+					AllowedRangesParsed: nil,
+				},
 			},
-			err: "",
 		},
 		{
 			name: "basic invalid configuration",
-			Input: &Config{
+			input: &Config{
 				Self: []byte(configData),
 				API: &APICfg{
-					Server: &LocalApiServerCfg{},
+					Server: &LocalApiServerCfg{
+						ListenURI: "http://crowdsec.api",
+					},
 				},
 				Common: &CommonCfg{
-					LogDir:   "./tests/",
+					LogDir:   "./testdata/",
 					LogMedia: "stdout",
 				},
 				DisableAPI: false,
 			},
-			expectedResult: &LocalApiServerCfg{
-				Enable:   types.BoolPtr(true),
-				LogDir:   LogDirFullPath,
-				LogMedia: "stdout",
+			expected: &LocalApiServerCfg{
+				Enable:       ptr.Of(true),
+				PapiLogLevel: &logLevel,
 			},
-			err: "while loading profiles for LAPI",
+			expectedErr: "no database configuration provided",
 		},
 	}
 
-	for idx, test := range tests {
-		err := test.Input.LoadAPIServer()
-		if err == nil && test.err != "" {
-			fmt.Printf("TEST '%s': NOK\n", test.name)
-			t.Fatalf("%d/%d expected error, didn't get it", idx, len(tests))
-		} else if test.err != "" {
-			if !strings.HasPrefix(fmt.Sprintf("%s", err), test.err) {
-				fmt.Printf("TEST '%s': NOK\n", test.name)
-				t.Fatalf("%d/%d expected '%s' got '%s'", idx, len(tests),
-					test.err,
-					fmt.Sprintf("%s", err))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.input.LoadAPIServer(false)
+			cstest.RequireErrorContains(t, err, tc.expectedErr)
+
+			if tc.expectedErr != "" {
+				return
 			}
-		}
 
-		isOk := assert.Equal(t, test.expectedResult, test.Input.API.Server)
-		if !isOk {
-			t.Fatalf("TEST '%s': NOK", test.name)
-		} else {
-			fmt.Printf("TEST '%s': OK\n", test.name)
-		}
+			assert.Equal(t, tc.expected, tc.input.API.Server)
+		})
+	}
+}
 
+func mustParseCIDRNet(t *testing.T, s string) *net.IPNet {
+	_, ipNet, err := net.ParseCIDR(s)
+	require.NoError(t, err)
+
+	return ipNet
+}
+
+func TestParseCapiWhitelists(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		expected    *CapiWhitelist
+		expectedErr string
+	}{
+		{
+			name:  "empty file",
+			input: "",
+			expected: &CapiWhitelist{
+				Ips:   []net.IP{},
+				Cidrs: []*net.IPNet{},
+			},
+			expectedErr: "empty file",
+		},
+		{
+			name:  "empty ip and cidr",
+			input: `{"ips": [], "cidrs": []}`,
+			expected: &CapiWhitelist{
+				Ips:   []net.IP{},
+				Cidrs: []*net.IPNet{},
+			},
+		},
+		{
+			name:  "some ip",
+			input: `{"ips": ["1.2.3.4"]}`,
+			expected: &CapiWhitelist{
+				Ips:   []net.IP{net.IPv4(1, 2, 3, 4)},
+				Cidrs: []*net.IPNet{},
+			},
+		},
+		{
+			name:  "some cidr",
+			input: `{"cidrs": ["1.2.3.0/24"]}`,
+			expected: &CapiWhitelist{
+				Ips:   []net.IP{},
+				Cidrs: []*net.IPNet{mustParseCIDRNet(t, "1.2.3.0/24")},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wl, err := parseCapiWhitelists(strings.NewReader(tc.input))
+			cstest.RequireErrorContains(t, err, tc.expectedErr)
+
+			if tc.expectedErr != "" {
+				return
+			}
+
+			assert.Equal(t, tc.expected, wl)
+		})
 	}
 }

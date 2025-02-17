@@ -2,26 +2,30 @@ package csplugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"text/template"
 	"time"
 
 	"github.com/Masterminds/sprig/v3"
+	"github.com/google/uuid"
+	plugin "github.com/hashicorp/go-plugin"
+	log "github.com/sirupsen/logrus"
+	"gopkg.in/tomb.v2"
+	"gopkg.in/yaml.v2"
+
+	"github.com/crowdsecurity/go-cs-lib/csstring"
+	"github.com/crowdsecurity/go-cs-lib/slicetools"
+
 	"github.com/crowdsecurity/crowdsec/pkg/csconfig"
 	"github.com/crowdsecurity/crowdsec/pkg/models"
 	"github.com/crowdsecurity/crowdsec/pkg/protobufs"
 	"github.com/crowdsecurity/crowdsec/pkg/types"
-	"github.com/google/uuid"
-	plugin "github.com/hashicorp/go-plugin"
-	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
-	"gopkg.in/tomb.v2"
-	"gopkg.in/yaml.v2"
 )
 
 var pluginMutex sync.Mutex
@@ -41,7 +45,7 @@ type PluginBroker struct {
 	pluginConfigByName              map[string]PluginConfig
 	pluginMap                       map[string]plugin.Plugin
 	notificationConfigsByPluginType map[string][][]byte // "slack" -> []{config1, config2}
-	notificationPluginByName        map[string]Notifier
+	notificationPluginByName        map[string]protobufs.NotifierServer
 	watcher                         PluginWatcher
 	pluginKillMethods               []func()
 	pluginProcConfig                *csconfig.PluginCfg
@@ -68,10 +72,10 @@ type ProfileAlert struct {
 	Alert     *models.Alert
 }
 
-func (pb *PluginBroker) Init(pluginCfg *csconfig.PluginCfg, profileConfigs []*csconfig.ProfileCfg, configPaths *csconfig.ConfigurationPaths) error {
+func (pb *PluginBroker) Init(ctx context.Context, pluginCfg *csconfig.PluginCfg, profileConfigs []*csconfig.ProfileCfg, configPaths *csconfig.ConfigurationPaths) error {
 	pb.PluginChannel = make(chan ProfileAlert)
 	pb.notificationConfigsByPluginType = make(map[string][][]byte)
-	pb.notificationPluginByName = make(map[string]Notifier)
+	pb.notificationPluginByName = make(map[string]protobufs.NotifierServer)
 	pb.pluginMap = make(map[string]plugin.Plugin)
 	pb.pluginConfigByName = make(map[string]PluginConfig)
 	pb.alertsByPluginName = make(map[string][]*models.Alert)
@@ -79,15 +83,14 @@ func (pb *PluginBroker) Init(pluginCfg *csconfig.PluginCfg, profileConfigs []*cs
 	pb.pluginProcConfig = pluginCfg
 	pb.pluginsTypesToDispatch = make(map[string]struct{})
 	if err := pb.loadConfig(configPaths.NotificationDir); err != nil {
-		return errors.Wrap(err, "while loading plugin config")
+		return fmt.Errorf("while loading plugin config: %w", err)
 	}
-	if err := pb.loadPlugins(configPaths.PluginDir); err != nil {
-		return errors.Wrap(err, "while loading plugin")
+	if err := pb.loadPlugins(ctx, configPaths.PluginDir); err != nil {
+		return fmt.Errorf("while loading plugin: %w", err)
 	}
 	pb.watcher = PluginWatcher{}
 	pb.watcher.Init(pb.pluginConfigByName, pb.alertsByPluginName)
 	return nil
-
 }
 
 func (pb *PluginBroker) Kill() {
@@ -99,22 +102,28 @@ func (pb *PluginBroker) Kill() {
 func (pb *PluginBroker) Run(pluginTomb *tomb.Tomb) {
 	//we get signaled via the channel when notifications need to be delivered to plugin (via the watcher)
 	pb.watcher.Start(&tomb.Tomb{})
-loop:
 	for {
 		select {
 		case profileAlert := <-pb.PluginChannel:
 			pb.addProfileAlert(profileAlert)
 
 		case pluginName := <-pb.watcher.PluginEvents:
-			// this can be ran in goroutine, but then locks will be needed
+			// this can be run in goroutine, but then locks will be needed
 			pluginMutex.Lock()
 			log.Tracef("going to deliver %d alerts to plugin %s", len(pb.alertsByPluginName[pluginName]), pluginName)
 			tmpAlerts := pb.alertsByPluginName[pluginName]
 			pb.alertsByPluginName[pluginName] = make([]*models.Alert, 0)
 			pluginMutex.Unlock()
 			go func() {
-				if err := pb.pushNotificationsToPlugin(pluginName, tmpAlerts); err != nil {
-					log.WithField("plugin:", pluginName).Error(err)
+				//Chunk alerts to respect group_threshold
+				threshold := pb.pluginConfigByName[pluginName].GroupThreshold
+				if threshold == 0 {
+					threshold = 1
+				}
+				for _, chunk := range slicetools.Chunks(tmpAlerts, threshold) {
+					if err := pb.pushNotificationsToPlugin(pluginName, chunk); err != nil {
+						log.WithField("plugin:", pluginName).Error(err)
+					}
 				}
 			}()
 
@@ -126,9 +135,9 @@ loop:
 				case <-pb.watcher.tomb.Dead():
 					log.Info("killing all plugins")
 					pb.Kill()
-					break loop
+					return
 				case pluginName := <-pb.watcher.PluginEvents:
-					// this can be ran in goroutine, but then locks will be needed
+					// this can be run in goroutine, but then locks will be needed
 					pluginMutex.Lock()
 					log.Tracef("going to deliver %d alerts to plugin %s", len(pb.alertsByPluginName[pluginName]), pluginName)
 					tmpAlerts := pb.alertsByPluginName[pluginName]
@@ -156,6 +165,7 @@ func (pb *PluginBroker) addProfileAlert(profileAlert ProfileAlert) {
 		pb.watcher.Inserts <- pluginName
 	}
 }
+
 func (pb *PluginBroker) profilesContainPlugin(pluginName string) bool {
 	for _, profileCfg := range pb.profileConfigs {
 		for _, name := range profileCfg.Notifications {
@@ -166,6 +176,7 @@ func (pb *PluginBroker) profilesContainPlugin(pluginName string) bool {
 	}
 	return false
 }
+
 func (pb *PluginBroker) loadConfig(path string) error {
 	files, err := listFilesAtPath(path)
 	if err != nil {
@@ -181,21 +192,21 @@ func (pb *PluginBroker) loadConfig(path string) error {
 			return err
 		}
 		for _, pluginConfig := range pluginConfigs {
+			SetRequiredFields(&pluginConfig)
+			if _, ok := pb.pluginConfigByName[pluginConfig.Name]; ok {
+				log.Warningf("notification '%s' is defined multiple times", pluginConfig.Name)
+			}
+			pb.pluginConfigByName[pluginConfig.Name] = pluginConfig
 			if !pb.profilesContainPlugin(pluginConfig.Name) {
 				continue
 			}
-			setRequiredFields(&pluginConfig)
-			if _, ok := pb.pluginConfigByName[pluginConfig.Name]; ok {
-				log.Warnf("several configs for notification %s found  ", pluginConfig.Name)
-			}
-			pb.pluginConfigByName[pluginConfig.Name] = pluginConfig
 		}
 	}
 	err = pb.verifyPluginConfigsWithProfile()
 	return err
 }
 
-// checks whether every notification in profile has it's own config file
+// checks whether every notification in profile has its own config file
 func (pb *PluginBroker) verifyPluginConfigsWithProfile() error {
 	for _, profileCfg := range pb.profileConfigs {
 		for _, pluginName := range profileCfg.Notifications {
@@ -208,7 +219,7 @@ func (pb *PluginBroker) verifyPluginConfigsWithProfile() error {
 	return nil
 }
 
-// check whether each plugin in profile has it's own binary
+// check whether each plugin in profile has its own binary
 func (pb *PluginBroker) verifyPluginBinaryWithProfile() error {
 	for _, profileCfg := range pb.profileConfigs {
 		for _, pluginName := range profileCfg.Notifications {
@@ -220,7 +231,7 @@ func (pb *PluginBroker) verifyPluginBinaryWithProfile() error {
 	return nil
 }
 
-func (pb *PluginBroker) loadPlugins(path string) error {
+func (pb *PluginBroker) loadPlugins(ctx context.Context, path string) error {
 	binaryPaths, err := listFilesAtPath(path)
 	if err != nil {
 		return err
@@ -254,10 +265,10 @@ func (pb *PluginBroker) loadPlugins(path string) error {
 			if err != nil {
 				return err
 			}
-			data = []byte(os.ExpandEnv(string(data)))
-			_, err = pluginClient.Configure(context.Background(), &protobufs.Config{Config: data})
+			data = []byte(csstring.StrictExpand(string(data), os.LookupEnv))
+			_, err = pluginClient.Configure(ctx, &protobufs.Config{Config: data})
 			if err != nil {
-				return errors.Wrapf(err, "while configuring %s", pc.Name)
+				return fmt.Errorf("while configuring %s: %w", pc.Name, err)
 			}
 			log.Infof("registered plugin %s", pc.Name)
 			pb.notificationPluginByName[pc.Name] = pluginClient
@@ -266,8 +277,7 @@ func (pb *PluginBroker) loadPlugins(path string) error {
 	return pb.verifyPluginBinaryWithProfile()
 }
 
-func (pb *PluginBroker) loadNotificationPlugin(name string, binaryPath string) (Notifier, error) {
-
+func (pb *PluginBroker) loadNotificationPlugin(name string, binaryPath string) (protobufs.NotifierServer, error) {
 	handshake, err := getHandshake()
 	if err != nil {
 		return nil, err
@@ -303,7 +313,7 @@ func (pb *PluginBroker) loadNotificationPlugin(name string, binaryPath string) (
 		return nil, err
 	}
 	pb.pluginKillMethods = append(pb.pluginKillMethods, c.Kill)
-	return raw.(Notifier), nil
+	return raw.(protobufs.NotifierServer), nil
 }
 
 func (pb *PluginBroker) pushNotificationsToPlugin(pluginName string, alerts []*models.Alert) error {
@@ -312,7 +322,7 @@ func (pb *PluginBroker) pushNotificationsToPlugin(pluginName string, alerts []*m
 		return nil
 	}
 
-	message, err := formatAlerts(pb.pluginConfigByName[pluginName].Format, alerts)
+	message, err := FormatAlerts(pb.pluginConfigByName[pluginName].Format, alerts)
 	if err != nil {
 		return err
 	}
@@ -343,7 +353,7 @@ func ParsePluginConfigFile(path string) ([]PluginConfig, error) {
 	parsedConfigs := make([]PluginConfig, 0)
 	yamlFile, err := os.Open(path)
 	if err != nil {
-		return parsedConfigs, errors.Wrapf(err, "while opening %s", path)
+		return nil, fmt.Errorf("while opening %s: %w", path, err)
 	}
 	dec := yaml.NewDecoder(yamlFile)
 	dec.SetStrict(true)
@@ -354,14 +364,18 @@ func ParsePluginConfigFile(path string) ([]PluginConfig, error) {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return []PluginConfig{}, fmt.Errorf("while decoding %s got error %s", path, err)
+			return nil, fmt.Errorf("while decoding %s got error %s", path, err)
+		}
+		// if the yaml document is empty, skip
+		if reflect.DeepEqual(pc, PluginConfig{}) {
+			continue
 		}
 		parsedConfigs = append(parsedConfigs, pc)
 	}
 	return parsedConfigs, nil
 }
 
-func setRequiredFields(pluginCfg *PluginConfig) {
+func SetRequiredFields(pluginCfg *PluginConfig) {
 	if pluginCfg.MaxRetry == 0 {
 		pluginCfg.MaxRetry++
 	}
@@ -369,23 +383,6 @@ func setRequiredFields(pluginCfg *PluginConfig) {
 	if pluginCfg.TimeOut == time.Second*0 {
 		pluginCfg.TimeOut = time.Second * 5
 	}
-
-}
-
-// helper which gives paths to all files in the given directory non-recursively
-func listFilesAtPath(path string) ([]string, error) {
-	filePaths := make([]string, 0)
-	files, err := os.ReadDir(path)
-	if err != nil {
-		return nil, err
-	}
-	for _, file := range files {
-		if file.IsDir() {
-			continue
-		}
-		filePaths = append(filePaths, filepath.Join(path, file.Name()))
-	}
-	return filePaths, nil
 }
 
 func getUUID() (string, error) {
@@ -409,7 +406,7 @@ func getHandshake() (plugin.HandshakeConfig, error) {
 	return handshake, nil
 }
 
-func formatAlerts(format string, alerts []*models.Alert) (string, error) {
+func FormatAlerts(format string, alerts []*models.Alert) (string, error) {
 	template, err := template.New("").Funcs(sprig.TxtFuncMap()).Funcs(funcMap()).Parse(format)
 	if err != nil {
 		return "", err

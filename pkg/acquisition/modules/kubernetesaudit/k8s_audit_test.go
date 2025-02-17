@@ -1,15 +1,19 @@
 package kubernetesauditacquisition
 
 import (
+	"context"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/crowdsecurity/crowdsec/pkg/types"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/tomb.v2"
+
+	"github.com/crowdsecurity/crowdsec/pkg/acquisition/configuration"
+	"github.com/crowdsecurity/crowdsec/pkg/types"
 )
 
 func TestBadConfiguration(t *testing.T) {
@@ -20,18 +24,18 @@ func TestBadConfiguration(t *testing.T) {
 	}{
 		{
 			name: "unknown field",
-			config: `source: k8s_audit
+			config: `source: k8s-audit
 foobar: asd.log`,
 			expectedErr: "line 2: field foobar not found in type kubernetesauditacquisition.KubernetesAuditConfiguration",
 		},
 		{
 			name:        "missing listen_addr",
-			config:      `source: k8s_audit`,
+			config:      `source: k8s-audit`,
 			expectedErr: "listen_addr cannot be empty",
 		},
 		{
 			name: "missing listen_port",
-			config: `source: k8s_audit
+			config: `source: k8s-audit
 listen_addr: 0.0.0.0`,
 			expectedErr: "listen_port cannot be empty",
 		},
@@ -44,12 +48,12 @@ listen_addr: 0.0.0.0`,
 			err := f.UnmarshalConfig([]byte(test.config))
 
 			assert.Contains(t, err.Error(), test.expectedErr)
-
 		})
 	}
 }
 
 func TestInvalidConfig(t *testing.T) {
+	ctx := context.Background()
 	tests := []struct {
 		name        string
 		config      string
@@ -57,7 +61,7 @@ func TestInvalidConfig(t *testing.T) {
 	}{
 		{
 			name: "invalid_port",
-			config: `source: k8s_audit
+			config: `source: k8s-audit
 listen_addr: 127.0.0.1
 listen_port: 9999999
 webhook_path: /k8s-audit`,
@@ -65,9 +69,7 @@ webhook_path: /k8s-audit`,
 		},
 	}
 
-	subLogger := log.WithFields(log.Fields{
-		"type": "k8s-audit",
-	})
+	subLogger := log.WithField("type", "k8s-audit")
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -78,27 +80,28 @@ webhook_path: /k8s-audit`,
 
 			err := f.UnmarshalConfig([]byte(test.config))
 
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
-			err = f.Configure([]byte(test.config), subLogger)
+			err = f.Configure([]byte(test.config), subLogger, configuration.METRICS_NONE)
 
-			assert.NoError(t, err)
-			f.StreamingAcquisition(out, tb)
+			require.NoError(t, err)
+			err = f.StreamingAcquisition(ctx, out, tb)
+			require.NoError(t, err)
 
 			time.Sleep(1 * time.Second)
 			tb.Kill(nil)
 			err = tb.Wait()
 			if test.expectedErr != "" {
-				assert.ErrorContains(t, err, test.expectedErr)
+				require.ErrorContains(t, err, test.expectedErr)
 				return
 			}
-			assert.NoError(t, err)
+			require.NoError(t, err)
 		})
 	}
-
 }
 
 func TestHandler(t *testing.T) {
+	ctx := context.Background()
 	tests := []struct {
 		name               string
 		config             string
@@ -109,7 +112,7 @@ func TestHandler(t *testing.T) {
 	}{
 		{
 			name: "valid_json",
-			config: `source: k8s_audit
+			config: `source: k8s-audit
 listen_addr: 127.0.0.1
 listen_port: 49234
 webhook_path: /k8s-audit`,
@@ -208,7 +211,7 @@ webhook_path: /k8s-audit`,
 		},
 		{
 			name: "invalid_json",
-			config: `source: k8s_audit
+			config: `source: k8s-audit
 listen_addr: 127.0.0.1
 listen_port: 49234
 webhook_path: /k8s-audit`,
@@ -219,7 +222,7 @@ webhook_path: /k8s-audit`,
 		},
 		{
 			name: "invalid_method",
-			config: `source: k8s_audit
+			config: `source: k8s-audit
 listen_addr: 127.0.0.1
 listen_port: 49234
 webhook_path: /k8s-audit`,
@@ -229,9 +232,7 @@ webhook_path: /k8s-audit`,
 		},
 	}
 
-	subLogger := log.WithFields(log.Fields{
-		"type": "k8s-audit",
-	})
+	subLogger := log.WithField("type", "k8s-audit")
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -252,27 +253,28 @@ webhook_path: /k8s-audit`,
 
 			f := KubernetesAuditSource{}
 			err := f.UnmarshalConfig([]byte(test.config))
-			assert.NoError(t, err)
-			err = f.Configure([]byte(test.config), subLogger)
+			require.NoError(t, err)
+			err = f.Configure([]byte(test.config), subLogger, configuration.METRICS_NONE)
 
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			req := httptest.NewRequest(test.method, "/k8s-audit", strings.NewReader(test.body))
 			w := httptest.NewRecorder()
 
-			f.StreamingAcquisition(out, tb)
+			err = f.StreamingAcquisition(ctx, out, tb)
+			require.NoError(t, err)
 
 			f.webhookHandler(w, req)
 
 			res := w.Result()
 
 			assert.Equal(t, test.expectedStatusCode, res.StatusCode)
-			//time.Sleep(1 * time.Second)
-			assert.NoError(t, err)
+			// time.Sleep(1 * time.Second)
+			require.NoError(t, err)
 
 			tb.Kill(nil)
 			err = tb.Wait()
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			assert.Equal(t, test.eventCount, eventCount)
 		})

@@ -3,9 +3,9 @@ package leakybucket
 import (
 	"time"
 
-	"github.com/crowdsecurity/crowdsec/pkg/types"
-	"github.com/davecgh/go-spew/spew"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/crowdsecurity/crowdsec/pkg/types"
 )
 
 func TimeMachinePour(l *Leaky, msg types.Event) {
@@ -14,13 +14,17 @@ func TimeMachinePour(l *Leaky, msg types.Event) {
 		err error
 	)
 	if msg.MarshaledTime == "" {
-		log.Warningf("Trying to time-machine event without timestamp : %s", spew.Sdump(msg))
+		log.WithFields(log.Fields{
+			"evt_type": msg.Line.Labels["type"],
+			"evt_src":  msg.Line.Src,
+			"scenario": l.Name,
+		}).Warningf("Trying to process event without evt.StrTime. Event cannot be poured to scenario")
 		return
 	}
 
 	err = d.UnmarshalText([]byte(msg.MarshaledTime))
 	if err != nil {
-		log.Warningf("Failed unmarshaling event time (%s) : %v", msg.MarshaledTime, err)
+		log.Warningf("Failed to parse event time (%s) : %v", msg.MarshaledTime, err)
 		return
 	}
 
@@ -32,8 +36,7 @@ func TimeMachinePour(l *Leaky, msg types.Event) {
 	}
 	l.Last_ts = d
 	l.mutex.Unlock()
-
-	if l.Limiter.AllowN(d, 1) {
+	if l.Limiter.AllowN(d, 1) || l.conditionalOverflow {
 		l.logger.Tracef("Time-Pouring event %s (tokens:%f)", d, l.Limiter.GetTokensCount())
 		l.Queue.Add(msg)
 	} else {
@@ -48,6 +51,6 @@ func NewTimeMachine(g BucketFactory) *Leaky {
 	l := NewLeaky(g)
 	g.logger.Tracef("Instantiating timeMachine bucket")
 	l.Pour = TimeMachinePour
-	l.Mode = TIMEMACHINE
+	l.Mode = types.TIMEMACHINE
 	return l
 }

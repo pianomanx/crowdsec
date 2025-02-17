@@ -1,8 +1,13 @@
 package rfc3164
 
 import (
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/crowdsecurity/go-cs-lib/cstest"
 )
 
 func TestPri(t *testing.T) {
@@ -21,27 +26,19 @@ func TestPri(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.input, func(t *testing.T) {
 			r := &RFC3164{}
 			r.buf = []byte(test.input)
 			r.len = len(r.buf)
+
 			err := r.parsePRI()
-			if err != nil {
-				if test.expectedErr != "" {
-					if err.Error() != test.expectedErr {
-						t.Errorf("expected error %s, got %s", test.expectedErr, err)
-					}
-				} else {
-					t.Errorf("unexpected error: %s", err)
-				}
-			} else {
-				if test.expectedErr != "" {
-					t.Errorf("expected error %s, got no error", test.expectedErr)
-				} else if r.PRI != test.expected {
-					t.Errorf("expected %d, got %d", test.expected, r.PRI)
-				}
+			cstest.RequireErrorContains(t, err, test.expectedErr)
+
+			if test.expectedErr != "" {
+				return
 			}
+
+			assert.Equal(t, test.expected, r.PRI)
 		})
 	}
 }
@@ -54,7 +51,7 @@ func TestTimestamp(t *testing.T) {
 		currentYear bool
 	}{
 		{"May 20 09:33:54", "0000-05-20T09:33:54Z", "", false},
-		{"May 20 09:33:54", "2022-05-20T09:33:54Z", "", true},
+		{"May 20 09:33:54", fmt.Sprintf("%d-05-20T09:33:54Z", time.Now().Year()), "", true},
 		{"May 20 09:33:54 2022", "2022-05-20T09:33:54Z", "", false},
 		{"May  1 09:33:54 2022", "2022-05-01T09:33:54Z", "", false},
 		{"May 01 09:33:54 2021", "2021-05-01T09:33:54Z", "", true},
@@ -62,31 +59,24 @@ func TestTimestamp(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.input, func(t *testing.T) {
 			opts := []RFC3164Option{}
 			if test.currentYear {
 				opts = append(opts, WithCurrentYear())
 			}
+
 			r := NewRFC3164Parser(opts...)
 			r.buf = []byte(test.input)
 			r.len = len(r.buf)
+
 			err := r.parseTimestamp()
-			if err != nil {
-				if test.expectedErr != "" {
-					if err.Error() != test.expectedErr {
-						t.Errorf("expected error %s, got %s", test.expectedErr, err)
-					}
-				} else {
-					t.Errorf("unexpected error: %s", err)
-				}
-			} else {
-				if test.expectedErr != "" {
-					t.Errorf("expected error %s, got no error", test.expectedErr)
-				} else if r.Timestamp.Format(time.RFC3339) != test.expected {
-					t.Errorf("expected %s, got %s", test.expected, r.Timestamp.Format(time.RFC3339))
-				}
+			cstest.RequireErrorContains(t, err, test.expectedErr)
+
+			if test.expectedErr != "" {
+				return
 			}
+
+			assert.Equal(t, test.expected, r.Timestamp.Format(time.RFC3339))
 		})
 	}
 }
@@ -116,31 +106,24 @@ func TestHostname(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.input, func(t *testing.T) {
 			opts := []RFC3164Option{}
 			if test.strictHostname {
 				opts = append(opts, WithStrictHostname())
 			}
+
 			r := NewRFC3164Parser(opts...)
 			r.buf = []byte(test.input)
 			r.len = len(r.buf)
+
 			err := r.parseHostname()
-			if err != nil {
-				if test.expectedErr != "" {
-					if err.Error() != test.expectedErr {
-						t.Errorf("expected error %s, got %s", test.expectedErr, err)
-					}
-				} else {
-					t.Errorf("unexpected error: %s", err)
-				}
-			} else {
-				if test.expectedErr != "" {
-					t.Errorf("expected error %s, got no error", test.expectedErr)
-				} else if r.Hostname != test.expected {
-					t.Errorf("expected %s, got %s", test.expected, r.Hostname)
-				}
+			cstest.RequireErrorContains(t, err, test.expectedErr)
+
+			if test.expectedErr != "" {
+				return
 			}
+
+			assert.Equal(t, test.expected, r.Hostname)
 		})
 	}
 }
@@ -161,32 +144,20 @@ func TestTag(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.input, func(t *testing.T) {
 			r := &RFC3164{}
 			r.buf = []byte(test.input)
 			r.len = len(r.buf)
+
 			err := r.parseTag()
-			if err != nil {
-				if test.expectedErr != "" {
-					if err.Error() != test.expectedErr {
-						t.Errorf("expected error %s, got %s", test.expectedErr, err)
-					}
-				} else {
-					t.Errorf("unexpected error: %s", err)
-				}
-			} else {
-				if test.expectedErr != "" {
-					t.Errorf("expected error %s, got no error", test.expectedErr)
-				} else {
-					if r.Tag != test.expected {
-						t.Errorf("expected %s, got %s", test.expected, r.Tag)
-					}
-					if r.PID != test.expectedPID {
-						t.Errorf("expected %s, got %s", test.expected, r.Message)
-					}
-				}
+			cstest.RequireErrorContains(t, err, test.expectedErr)
+
+			if test.expectedErr != "" {
+				return
 			}
+
+			assert.Equal(t, test.expected, r.Tag)
+			assert.Equal(t, test.expectedPID, r.PID)
 		})
 	}
 }
@@ -205,27 +176,19 @@ func TestMessage(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.input, func(t *testing.T) {
 			r := &RFC3164{}
 			r.buf = []byte(test.input)
 			r.len = len(r.buf)
+
 			err := r.parseMessage()
-			if err != nil {
-				if test.expectedErr != "" {
-					if err.Error() != test.expectedErr {
-						t.Errorf("expected error %s, got %s", test.expectedErr, err)
-					}
-				} else {
-					t.Errorf("unexpected error: %s", err)
-				}
-			} else {
-				if test.expectedErr != "" {
-					t.Errorf("expected error %s, got no error", test.expectedErr)
-				} else if r.Message != test.expected {
-					t.Errorf("expected message %s, got %s", test.expected, r.Tag)
-				}
+			cstest.RequireErrorContains(t, err, test.expectedErr)
+
+			if test.expectedErr != "" {
+				return
 			}
+
+			assert.Equal(t, test.expected, r.Message)
 		})
 	}
 }
@@ -239,6 +202,7 @@ func TestParse(t *testing.T) {
 		Message   string
 		PRI       int
 	}
+
 	tests := []struct {
 		input       string
 		expected    expected
@@ -257,7 +221,7 @@ func TestParse(t *testing.T) {
 		},
 		{
 			"<12>May 20 09:33:54 UDMPRO,a2edd0c6ae48,udm-1.10.0.3686 kernel: foo", expected{
-				Timestamp: time.Date(2022, time.May, 20, 9, 33, 54, 0, time.UTC),
+				Timestamp: time.Date(time.Now().Year(), time.May, 20, 9, 33, 54, 0, time.UTC),
 				Hostname:  "UDMPRO,a2edd0c6ae48,udm-1.10.0.3686",
 				Tag:       "kernel",
 				PID:       "",
@@ -327,42 +291,22 @@ func TestParse(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.input, func(t *testing.T) {
 			r := NewRFC3164Parser(test.opts...)
+
 			err := r.Parse([]byte(test.input))
-			if err != nil {
-				if test.expectedErr != "" {
-					if err.Error() != test.expectedErr {
-						t.Errorf("expected error '%s', got '%s'", test.expectedErr, err)
-					}
-				} else {
-					t.Errorf("unexpected error: '%s'", err)
-				}
-			} else {
-				if test.expectedErr != "" {
-					t.Errorf("expected error '%s', got no error", test.expectedErr)
-				} else {
-					if r.Timestamp != test.expected.Timestamp {
-						t.Errorf("expected timestamp '%s', got '%s'", test.expected.Timestamp, r.Timestamp)
-					}
-					if r.Hostname != test.expected.Hostname {
-						t.Errorf("expected hostname '%s', got '%s'", test.expected.Hostname, r.Hostname)
-					}
-					if r.Tag != test.expected.Tag {
-						t.Errorf("expected tag '%s', got '%s'", test.expected.Tag, r.Tag)
-					}
-					if r.PID != test.expected.PID {
-						t.Errorf("expected pid '%s', got '%s'", test.expected.PID, r.PID)
-					}
-					if r.Message != test.expected.Message {
-						t.Errorf("expected message '%s', got '%s'", test.expected.Message, r.Message)
-					}
-					if r.PRI != test.expected.PRI {
-						t.Errorf("expected pri '%d', got '%d'", test.expected.PRI, r.PRI)
-					}
-				}
+			cstest.RequireErrorContains(t, err, test.expectedErr)
+
+			if test.expectedErr != "" {
+				return
 			}
+
+			assert.Equal(t, test.expected.Timestamp, r.Timestamp)
+			assert.Equal(t, test.expected.Hostname, r.Hostname)
+			assert.Equal(t, test.expected.Tag, r.Tag)
+			assert.Equal(t, test.expected.PID, r.PID)
+			assert.Equal(t, test.expected.Message, r.Message)
+			assert.Equal(t, test.expected.PRI, r.PRI)
 		})
 	}
 }

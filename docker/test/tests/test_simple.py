@@ -1,0 +1,14 @@
+import pytest
+
+pytestmark = pytest.mark.docker
+
+
+# XXX this is redundant, already tested in pytest_cs
+def test_crowdsec(crowdsec, flavor: str) -> None:
+    with crowdsec(flavor=flavor) as cs:
+        for waiter in cs.log_waiters():
+            with waiter as matcher:
+                matcher.fnmatch_lines(["*Starting processing data*"])
+        res = cs.cont.exec_run('sh -c "echo $CI_TESTING"')
+        assert res.exit_code == 0
+        assert res.output.decode().strip() == "true"

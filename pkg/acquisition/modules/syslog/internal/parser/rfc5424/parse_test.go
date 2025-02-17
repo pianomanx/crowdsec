@@ -3,6 +3,10 @@ package rfc5424
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/crowdsecurity/go-cs-lib/cstest"
 )
 
 func TestPri(t *testing.T) {
@@ -21,27 +25,12 @@ func TestPri(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.input, func(t *testing.T) {
 			r := &RFC5424{}
 			r.buf = []byte(test.input)
 			r.len = len(r.buf)
 			err := r.parsePRI()
-			if err != nil {
-				if test.expectedErr != "" {
-					if err.Error() != test.expectedErr {
-						t.Errorf("expected error %s, got %s", test.expectedErr, err)
-					}
-				} else {
-					t.Errorf("unexpected error: %s", err)
-				}
-			} else {
-				if test.expectedErr != "" {
-					t.Errorf("expected error %s, got no error", test.expectedErr)
-				} else if r.PRI != test.expected {
-					t.Errorf("expected %d, got %d", test.expected, r.PRI)
-				}
-			}
+			cstest.RequireErrorMessage(t, err, test.expectedErr)
 		})
 	}
 }
@@ -71,7 +60,6 @@ func TestHostname(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.input, func(t *testing.T) {
 			opts := []RFC5424Option{}
 			if test.strictHostname {
@@ -81,21 +69,7 @@ func TestHostname(t *testing.T) {
 			r.buf = []byte(test.input)
 			r.len = len(r.buf)
 			err := r.parseHostname()
-			if err != nil {
-				if test.expectedErr != "" {
-					if err.Error() != test.expectedErr {
-						t.Errorf("expected error %s, got %s", test.expectedErr, err)
-					}
-				} else {
-					t.Errorf("unexpected error: %s", err)
-				}
-			} else {
-				if test.expectedErr != "" {
-					t.Errorf("expected error %s, got no error", test.expectedErr)
-				} else if r.Hostname != test.expected {
-					t.Errorf("expected %s, got %s", test.expected, r.Hostname)
-				}
-			}
+			cstest.RequireErrorMessage(t, err, test.expectedErr)
 		})
 	}
 }
@@ -120,7 +94,8 @@ func TestParse(t *testing.T) {
 	}{
 		{
 			"valid msg",
-			`<13>1 2021-05-18T11:58:40.828081+02:42 mantis sshd 49340 - [timeQuality isSynced="0" tzKnown="1"] blabla`, expected{
+			`<13>1 2021-05-18T11:58:40.828081+02:42 mantis sshd 49340 - [timeQuality isSynced="0" tzKnown="1"] blabla`,
+			expected{
 				Timestamp: time.Date(2021, 5, 18, 11, 58, 40, 828081000, time.FixedZone("+0242", 9720)),
 				Hostname:  "mantis",
 				Tag:       "sshd",
@@ -128,11 +103,14 @@ func TestParse(t *testing.T) {
 				MsgID:     "",
 				Message:   "blabla",
 				PRI:       13,
-			}, "", []RFC5424Option{},
+			},
+			"",
+			[]RFC5424Option{},
 		},
 		{
 			"valid msg with msgid",
-			`<13>1 2021-05-18T11:58:40.828081+02:42 mantis foobar 49340 123123 [timeQuality isSynced="0" tzKnown="1"] blabla`, expected{
+			`<13>1 2021-05-18T11:58:40.828081+02:42 mantis foobar 49340 123123 [timeQuality isSynced="0" tzKnown="1"] blabla`,
+			expected{
 				Timestamp: time.Date(2021, 5, 18, 11, 58, 40, 828081000, time.FixedZone("+0242", 9720)),
 				Hostname:  "mantis",
 				Tag:       "foobar",
@@ -140,11 +118,14 @@ func TestParse(t *testing.T) {
 				MsgID:     "123123",
 				Message:   "blabla",
 				PRI:       13,
-			}, "", []RFC5424Option{},
+			},
+			"",
+			[]RFC5424Option{},
 		},
 		{
 			"valid msg with repeating SD",
-			`<13>1 2021-05-18T11:58:40.828081+02:42 mantis foobar 49340 123123 [timeQuality isSynced="0" tzKnown="1"][foo="bar][a] blabla`, expected{
+			`<13>1 2021-05-18T11:58:40.828081+02:42 mantis foobar 49340 123123 [timeQuality isSynced="0" tzKnown="1"][foo="bar][a] blabla`,
+			expected{
 				Timestamp: time.Date(2021, 5, 18, 11, 58, 40, 828081000, time.FixedZone("+0242", 9720)),
 				Hostname:  "mantis",
 				Tag:       "foobar",
@@ -152,36 +133,53 @@ func TestParse(t *testing.T) {
 				MsgID:     "123123",
 				Message:   "blabla",
 				PRI:       13,
-			}, "", []RFC5424Option{},
+			},
+			"",
+			[]RFC5424Option{},
 		},
 		{
 			"invalid SD",
-			`<13>1 2021-05-18T11:58:40.828081+02:00 mantis foobar 49340 123123 [timeQuality asd`, expected{}, "structured data must end with ']'", []RFC5424Option{},
+			`<13>1 2021-05-18T11:58:40.828081+02:00 mantis foobar 49340 123123 [timeQuality asd`,
+			expected{},
+			"structured data must end with ']'",
+			[]RFC5424Option{},
 		},
 		{
 			"invalid version",
-			`<13>42 2021-05-18T11:58:40.828081+02:00 mantis foobar 49340 123123 [timeQuality isSynced="0" tzKnown="1"] blabla`, expected{}, "version must be 1", []RFC5424Option{},
+			`<13>42 2021-05-18T11:58:40.828081+02:00 mantis foobar 49340 123123 [timeQuality isSynced="0" tzKnown="1"] blabla`,
+			expected{},
+			"version must be 1",
+			[]RFC5424Option{},
 		},
 		{
 			"invalid message",
-			`<13>1`, expected{}, "version must be followed by a space", []RFC5424Option{},
+			`<13>1`,
+			expected{},
+			"version must be followed by a space",
+			[]RFC5424Option{},
 		},
 		{
 			"valid msg with empty fields",
-			`<13>1 - foo - - - - blabla`, expected{
-				Timestamp: time.Now().UTC().Round(0),
+			`<13>1 - foo - - - - blabla`,
+			expected{
+				Timestamp: time.Now().UTC(),
 				Hostname:  "foo",
 				PRI:       13,
 				Message:   "blabla",
-			}, "", []RFC5424Option{},
+			},
+			"",
+			[]RFC5424Option{},
 		},
 		{
 			"valid msg with empty fields",
-			`<13>1 - - - - - - blabla`, expected{
-				Timestamp: time.Now().UTC().Round(0),
+			`<13>1 - - - - - - blabla`,
+			expected{
+				Timestamp: time.Now().UTC(),
 				PRI:       13,
 				Message:   "blabla",
-			}, "", []RFC5424Option{},
+			},
+			"",
+			[]RFC5424Option{},
 		},
 		{
 			"valid msg with escaped SD",
@@ -193,7 +191,9 @@ func TestParse(t *testing.T) {
 				Hostname:  "testhostname",
 				MsgID:     `sn="msgid"`,
 				Message:   `testmessage`,
-			}, "", []RFC5424Option{},
+			},
+			"",
+			[]RFC5424Option{},
 		},
 		{
 			"valid complex msg",
@@ -205,7 +205,9 @@ func TestParse(t *testing.T) {
 				PRI:       13,
 				MsgID:     `sn="msgid"`,
 				Message:   `source: sn="www.foobar.com" | message: 1.1.1.1 - - [24/May/2022:10:57:37 +0200] "GET /dist/precache-manifest.58b57debe6bc4f96698da0dc314461e9.js HTTP/2.0" 304 0 "https://www.foobar.com/sw.js" "Mozilla/5.0 (Linux; Android 9; ANE-LX1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.61 Mobile Safari/537.36" "-" "www.foobar.com" sn="www.foobar.com" rt=0.000 ua="-" us="-" ut="-" ul="-" cs=HIT { request: /dist/precache-manifest.58b57debe6bc4f96698da0dc314461e9.js | src_ip_geo_country: DE | MONTH: May | COMMONAPACHELOG: 1.1.1.1 - - [24/May/2022:10:57:37 +0200] "GET /dist/precache-manifest.58b57debe6bc4f96698da0dc314461e9.js HTTP/2.0" 304 0 | auth: - | HOUR: 10 | gl2_remote_ip: 172.31.32.142 | ident: - | gl2_remote_port: 43375 | BASE10NUM: [2.0, 304, 0] | pid: -1 | program: nginx | gl2_source_input: 623ed3440183476d61cff974 | INT: +0200 | is_private_ip: false | YEAR: 2022 | src_ip_geo_city: Achern | clientip: 1.1.1.1 | USERNAME:`,
-			}, "", []RFC5424Option{},
+			},
+			"",
+			[]RFC5424Option{},
 		},
 		{
 			"partial message",
@@ -224,44 +226,31 @@ func TestParse(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			r := NewRFC5424Parser(test.opts...)
 			err := r.Parse([]byte(test.input))
-			if err != nil {
-				if test.expectedErr != "" {
-					if err.Error() != test.expectedErr {
-						t.Errorf("expected error '%s', got '%s'", test.expectedErr, err)
-					}
-				} else {
-					t.Errorf("unexpected error: '%s'", err)
-				}
-			} else {
-				if test.expectedErr != "" {
-					t.Errorf("expected error '%s', got no error", test.expectedErr)
-				} else {
-					if r.Timestamp.Round(time.Second).String() != test.expected.Timestamp.Round(time.Second).String() {
-						t.Errorf("expected timestamp '%s', got '%s'", test.expected.Timestamp, r.Timestamp)
-					}
-					if r.Hostname != test.expected.Hostname {
-						t.Errorf("expected hostname '%s', got '%s'", test.expected.Hostname, r.Hostname)
-					}
-					if r.Tag != test.expected.Tag {
-						t.Errorf("expected tag '%s', got '%s'", test.expected.Tag, r.Tag)
-					}
-					if r.PID != test.expected.PID {
-						t.Errorf("expected pid '%s', got '%s'", test.expected.PID, r.PID)
-					}
-					if r.Message != test.expected.Message {
-						t.Errorf("expected message '%s', got '%s'", test.expected.Message, r.Message)
-					}
-					if r.PRI != test.expected.PRI {
-						t.Errorf("expected pri '%d', got '%d'", test.expected.PRI, r.PRI)
-					}
-					if r.MsgID != test.expected.MsgID {
-						t.Errorf("expected msgid '%s', got '%s'", test.expected.MsgID, r.MsgID)
-					}
-				}
+			cstest.RequireErrorMessage(t, err, test.expectedErr)
+			if test.expectedErr != "" {
+				return
+			}
+			require.WithinDuration(t, test.expected.Timestamp, r.Timestamp, time.Second)
+			if r.Hostname != test.expected.Hostname {
+				t.Errorf("expected hostname '%s', got '%s'", test.expected.Hostname, r.Hostname)
+			}
+			if r.Tag != test.expected.Tag {
+				t.Errorf("expected tag '%s', got '%s'", test.expected.Tag, r.Tag)
+			}
+			if r.PID != test.expected.PID {
+				t.Errorf("expected pid '%s', got '%s'", test.expected.PID, r.PID)
+			}
+			if r.Message != test.expected.Message {
+				t.Errorf("expected message '%s', got '%s'", test.expected.Message, r.Message)
+			}
+			if r.PRI != test.expected.PRI {
+				t.Errorf("expected pri '%d', got '%d'", test.expected.PRI, r.PRI)
+			}
+			if r.MsgID != test.expected.MsgID {
+				t.Errorf("expected msgid '%s', got '%s'", test.expected.MsgID, r.MsgID)
 			}
 		})
 	}

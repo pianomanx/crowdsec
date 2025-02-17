@@ -1,8 +1,13 @@
 package csplugin
 
 import (
+	"html"
+	"os"
 	"text/template"
 
+	log "github.com/sirupsen/logrus"
+
+	"github.com/crowdsecurity/crowdsec/pkg/exprhelpers"
 	"github.com/crowdsecurity/crowdsec/pkg/models"
 )
 
@@ -18,6 +23,15 @@ var helpers = template.FuncMap{
 		}
 		return metaValues
 	},
+	"CrowdsecCTI": func(x string) any {
+		ret, err := exprhelpers.CrowdsecCTI(x)
+		if err != nil {
+			log.Warningf("error while calling CrowdsecCTI : %s", err)
+		}
+		return ret
+	},
+	"Hostname":   os.Hostname,
+	"HTMLEscape": html.EscapeString,
 }
 
 func funcMap() template.FuncMap {
